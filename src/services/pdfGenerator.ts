@@ -354,6 +354,7 @@ export async function generarPlanillaPdf(
 export interface VistaActualMetadata {
   conteo: number
   ciudad: string
+  barrio: string
   tecnico: string
   columna: string
   direccion: 'asc' | 'desc'
@@ -403,7 +404,7 @@ export async function exportarVistaActualPdf(
 
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(8)
-  const resumen = `Vista de Despacho: ${metadata.conteo} órdenes | Filtros: Ciudad (${metadata.ciudad}) - Técnico (${metadata.tecnico}) | Ordenado por: ${metadata.columna} (${metadata.direccion})`
+  const resumen = `Vista de Despacho: ${metadata.conteo} órdenes | Filtros: Ciudad (${metadata.ciudad}) - Barrio (${metadata.barrio}) - Técnico (${metadata.tecnico}) | Ordenado por: ${metadata.columna} (${metadata.direccion})`
   doc.text(doc.splitTextToSize(resumen, ancho - 2 * MARGEN), MARGEN, 21)
   doc.text(`Generado: ${formatearFecha(new Date())}`, MARGEN, 28)
 

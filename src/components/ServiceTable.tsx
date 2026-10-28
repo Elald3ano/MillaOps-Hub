@@ -6,6 +6,7 @@ import {
   ArrowRight,
   ArrowUp,
   ArrowUpDown,
+  Building2,
   ChevronDown,
   FileDown,
   Inbox,
@@ -57,6 +58,7 @@ interface ServiceTableProps {
 interface FiltrosState {
   busqueda: string
   ciudades: string[]
+  barrios: string[]
   tecnicos: string[]
   servicios: string[]
   rangoSla: RangoSla
@@ -65,6 +67,7 @@ interface FiltrosState {
 const FILTROS_INICIALES: FiltrosState = {
   busqueda: '',
   ciudades: [],
+  barrios: [],
   tecnicos: [],
   servicios: [],
   rangoSla: 'todos',
@@ -232,9 +235,10 @@ export function ServiceTable({
 
   /**
    * FILTROS EN CASCADA — cada multi-selector depende del resto:
-   * · Ciudad   → depende de técnicos + servicios + búsqueda
-   * · Técnico  → depende de ciudades + servicios + búsqueda
-   * · Servicio → depende de ciudades + técnicos + búsqueda
+   * · Ciudad   → depende de barrios + técnicos + servicios + búsqueda
+   * · Barrio   → depende de ciudades + técnicos + servicios + búsqueda
+   * · Técnico  → depende de ciudades + barrios + servicios + búsqueda
+   * · Servicio → depende de ciudades + barrios + técnicos + búsqueda
    * (El SLA se aplica al final para no vaciar los selectores en cascada.)
    */
 
@@ -244,10 +248,24 @@ export function ServiceTable({
       servicios.filter(
         (s) =>
           coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
+          (filtros.barrios.length === 0 || filtros.barrios.includes(s.barrio)) &&
           coincideTecnico(s, filtros.tecnicos) &&
           (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)),
       ),
-    [servicios, filtros.busqueda, filtros.tecnicos, filtros.servicios],
+    [servicios, filtros.busqueda, filtros.barrios, filtros.tecnicos, filtros.servicios],
+  )
+
+  // Base para Barrio: todo excepto el propio filtro de barrios.
+  const baseBarrio = useMemo(
+    () =>
+      servicios.filter(
+        (s) =>
+          coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
+          (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+          coincideTecnico(s, filtros.tecnicos) &&
+          (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)),
+      ),
+    [servicios, filtros.busqueda, filtros.ciudades, filtros.tecnicos, filtros.servicios],
   )
 
   // Base para Técnico: todo excepto el propio filtro de técnicos.
@@ -257,9 +275,10 @@ export function ServiceTable({
         (s) =>
           coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
           (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+          (filtros.barrios.length === 0 || filtros.barrios.includes(s.barrio)) &&
           (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)),
       ),
-    [servicios, filtros.busqueda, filtros.ciudades, filtros.servicios],
+    [servicios, filtros.busqueda, filtros.ciudades, filtros.barrios, filtros.servicios],
   )
 
   // Base para Tipo de servicio: todo excepto el propio filtro de servicios.
@@ -269,9 +288,10 @@ export function ServiceTable({
         (s) =>
           coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
           (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+          (filtros.barrios.length === 0 || filtros.barrios.includes(s.barrio)) &&
           coincideTecnico(s, filtros.tecnicos),
       ),
-    [servicios, filtros.busqueda, filtros.ciudades, filtros.tecnicos],
+    [servicios, filtros.busqueda, filtros.ciudades, filtros.barrios, filtros.tecnicos],
   )
 
   /** Ciudades disponibles con su conteo, según los demás filtros. */
@@ -284,6 +304,18 @@ export function ServiceTable({
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([ciudad, cantidad]) => ({ id: ciudad, label: ciudad, count: cantidad }))
   }, [baseCiudad])
+
+  /** Barrios disponibles con su conteo, según los demás filtros (orden alfabético). */
+  const opcionesBarrio = useMemo<MultiSelectOpcion[]>(() => {
+    const conteo = new Map<string, number>()
+    for (const s of baseBarrio) {
+      if (!s.barrio) continue
+      conteo.set(s.barrio, (conteo.get(s.barrio) ?? 0) + 1)
+    }
+    return [...conteo.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([barrio, cantidad]) => ({ id: barrio, label: barrio, count: cantidad }))
+  }, [baseBarrio])
 
   /** Técnicos con órdenes en el contexto actual (incluye "Sin Asignar"). */
   const opcionesTecnico = useMemo<MultiSelectOpcion[]>(() => {
@@ -322,6 +354,7 @@ export function ServiceTable({
       (s) =>
         coincideBusqueda(s, busqueda) &&
         (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+        (filtros.barrios.length === 0 || filtros.barrios.includes(s.barrio)) &&
         coincideTecnico(s, filtros.tecnicos) &&
         (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)) &&
         coincideRangoSla(s.dias_antiguedad, filtros.rangoSla),
@@ -377,6 +410,7 @@ export function ServiceTable({
   const hayFiltrosActivos =
     filtros.busqueda !== '' ||
     filtros.ciudades.length > 0 ||
+    filtros.barrios.length > 0 ||
     filtros.tecnicos.length > 0 ||
     filtros.servicios.length > 0 ||
     filtros.rangoSla !== 'todos'
@@ -386,11 +420,31 @@ export function ServiceTable({
     setPagina(1)
   }
 
-  /** Actualiza el multi-selector de ciudades y sincroniza el pre-llenado del PDF. */
+  /**
+   * Actualiza el multi-selector de ciudades y sincroniza el pre-llenado del PDF.
+   * Si cambia la ciudad, descarta los barrios que ya no existen en la nueva selección.
+   */
   function cambiarCiudades(nuevas: string[]) {
-    setFiltros((prev) => ({ ...prev, ciudades: nuevas }))
+    setFiltros((prev) => {
+      if (prev.barrios.length === 0) {
+        return { ...prev, ciudades: nuevas }
+      }
+      const barriosValidos = new Set(
+        servicios
+          .filter((s) => nuevas.length === 0 || nuevas.includes(s.ciudad))
+          .map((s) => s.barrio),
+      )
+      const barrios = prev.barrios.filter((b) => barriosValidos.has(b))
+      return { ...prev, ciudades: nuevas, barrios }
+    })
     setPagina(1)
     onCambioCiudadFiltrada?.(nuevas.length === 1 ? nuevas[0] : TODOS)
+  }
+
+  /** Actualiza el multi-selector de barrios. */
+  function cambiarBarrios(nuevos: string[]) {
+    setFiltros((prev) => ({ ...prev, barrios: nuevos }))
+    setPagina(1)
   }
 
   /** Actualiza el multi-selector de técnicos. */
@@ -427,6 +481,7 @@ export function ServiceTable({
     try {
       const { exportarVistaActualPdf } = await import('../services/pdfGenerator')
       const ciudadActiva = filtros.ciudades.length === 0 ? 'Todas' : filtros.ciudades.join(', ')
+      const barrioActivo = filtros.barrios.length === 0 ? 'Todos' : filtros.barrios.join(', ')
       const tecnicoActivo =
         filtros.tecnicos.length === 0
           ? 'Todos'
@@ -437,6 +492,7 @@ export function ServiceTable({
       const doc = await exportarVistaActualPdf(ordenados, tecnicos, {
         conteo: ordenados.length,
         ciudad: ciudadActiva,
+        barrio: barrioActivo,
         tecnico: tecnicoActivo,
         columna: orden.columna,
         direccion: orden.direccion,
@@ -466,7 +522,7 @@ export function ServiceTable({
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
       {/* Barra de control */}
-      <div className="grid gap-3 border-b border-slate-200 bg-slate-50/60 p-3 md:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_repeat(4,minmax(0,1fr))]">
+      <div className="grid gap-3 border-b border-slate-200 bg-slate-50/60 p-3 md:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_repeat(5,minmax(0,1fr))]">
         <div className="relative">
           <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-slate-400" />
           <input
@@ -486,6 +542,15 @@ export function ServiceTable({
           onSeleccionChange={cambiarCiudades}
           placeholderTodos="Todas las ciudades"
           icono={MapPin}
+        />
+
+        <MultiSelectFilter
+          label="Barrio"
+          opciones={opcionesBarrio}
+          seleccionados={filtros.barrios}
+          onSeleccionChange={cambiarBarrios}
+          placeholderTodos="Todos los barrios"
+          icono={Building2}
         />
 
         <MultiSelectFilter
