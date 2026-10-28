@@ -5,7 +5,7 @@ import { CIUDADES_SUGERIDAS } from '../lib/sla'
 
 interface FileUploadProps {
   procesando: boolean
-  onProcesar: (file: File, ciudadFiltro: string | undefined, esLineaBase: boolean) => Promise<void>
+  onProcesar: (file: File, ciudadFiltro: string | undefined) => Promise<void>
 }
 
 const EXTENSIONES_VALIDAS = ['.xlsx', '.xls']
@@ -25,7 +25,6 @@ function formatearTamano(bytes: number): string {
 export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
   const [archivo, setArchivo] = useState<File | null>(null)
   const [ciudad, setCiudad] = useState<string>('')
-  const [esLineaBase, setEsLineaBase] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [errorLocal, setErrorLocal] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -56,7 +55,7 @@ export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
   async function handleProcesar() {
     if (!archivo || procesando) return
     setErrorLocal(null)
-    await onProcesar(archivo, ciudad || undefined, esLineaBase)
+    await onProcesar(archivo, ciudad || undefined)
     setArchivo(null)
   }
 
@@ -119,7 +118,7 @@ export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
       />
 
       {/* Controles */}
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+      <div className="mt-4 grid gap-4">
         <label className="block">
           <span className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-600">
             <MapPin className="size-3.5" /> Ciudad / Zona
@@ -138,28 +137,6 @@ export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
             ))}
           </datalist>
         </label>
-
-        <div className="flex items-end">
-          <label className="flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-300 bg-white px-3 py-2 shadow-sm">
-            <span className="text-sm text-slate-700">Guardar como nueva Línea Base</span>
-            <span className="relative inline-flex shrink-0 items-center">
-              <input
-                type="checkbox"
-                checked={esLineaBase}
-                onChange={(e) => setEsLineaBase(e.target.checked)}
-                disabled={procesando}
-                className="peer sr-only"
-              />
-              <span
-                className={cn(
-                  'h-5 w-9 rounded-full bg-slate-300 transition peer-checked:bg-slate-900',
-                  'peer-focus-visible:ring-2 peer-focus-visible:ring-slate-400 peer-focus-visible:ring-offset-2',
-                )}
-              />
-              <span className="absolute top-0.5 left-0.5 size-4 rounded-full bg-white shadow transition peer-checked:translate-x-4" />
-            </span>
-          </label>
-        </div>
       </div>
 
       {errorLocal && <p className="mt-3 text-xs font-medium text-red-600">{errorLocal}</p>}
@@ -190,7 +167,7 @@ export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
             </>
           ) : (
             <>
-              <CloudUpload className="size-4" /> Procesar y guardar
+              <CloudUpload className="size-4" /> Procesar y Despachar
             </>
           )}
         </button>

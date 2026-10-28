@@ -1,20 +1,19 @@
-import { useMemo, useState } from 'react'
-import { Loader2, MapPin, Plus, Trash2, UserRound } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
+import { FileSpreadsheet, Loader2, RefreshCw, Search, Trash2, UserRound } from 'lucide-react'
 import { Modal } from './Modal'
-import { calcularPrioridad } from '../services/assignmentEngine'
-import { crearRegla, eliminarRegla } from '../services/supabaseService'
-import { CIUDADES_SUGERIDAS } from '../lib/sla'
+import { eliminarRegla, importarMatrizDesdeExcel } from '../services/supabaseService'
 import { cn } from '../lib/utils'
-import type { ReglaConTecnico, Tecnico } from '../types'
+import type { ReglaConTecnico, Servicio } from '../types'
 import type { ToastVariant } from './ToastContainer'
 
 interface RulesManagerModalProps {
   abierto: boolean
   onCerrar: () => void
   reglas: ReglaConTecnico[]
-  tecnicos: Tecnico[]
+  serviciosAbiertos: Servicio[]
   onCambio: () => Promise<void>
   notificar: (mensaje: string, variant?: ToastVariant) => void
+  onReaplicar: () => void
 }
 
 const PRIORIDAD_LABELS: Record<number, string> = {
@@ -29,80 +28,39 @@ const PRIORIDAD_BADGE: Record<number, string> = {
   3: 'bg-slate-100 text-slate-600 ring-slate-200',
 }
 
-/** Modal para gestionar la matriz de reglas de asignación. */
+/** Modal para importar la matriz (Excel) y revisar el listado de reglas. */
 export function RulesManagerModal({
   abierto,
   onCerrar,
   reglas,
-  tecnicos,
+  serviciosAbiertos,
   onCambio,
   notificar,
+  onReaplicar,
 }: RulesManagerModalProps) {
-  const [ciudad, setCiudad] = useState('')
-  const [barrio, setBarrio] = useState('')
-  const [tipoServicio, setTipoServicio] = useState('')
-  const [tecnicoId, setTecnicoId] = useState('')
-  const [guardando, setGuardando] = useState(false)
+  const [busquedaRegla, setBusquedaRegla] = useState('')
   const [eliminandoId, setEliminandoId] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [importando, setImportando] = useState(false)
+  const [resultadoImportacion, setResultadoImportacion] = useState<{
+    tecnicosCreados: number
+    reglasCreadas: number
+  } | null>(null)
+  const inputMatrizRef = useRef<HTMLInputElement>(null)
 
-  const tecnicosActivos = useMemo(
-    () => tecnicos.filter((t) => t.activo).sort((a, b) => a.nombre.localeCompare(b.nombre)),
-    [tecnicos],
-  )
-
-  const reglasOrdenadas = useMemo(
-    () =>
-      [...reglas].sort(
-        (a, b) => a.prioridad - b.prioridad || a.ciudad.localeCompare(b.ciudad),
-      ),
-    [reglas],
-  )
-
-  const tiposExistentes = useMemo(
-    () =>
-      Array.from(new Set(reglas.map((r) => r.tipo_servicio).filter((t): t is string => !!t))).sort(
-        (a, b) => a.localeCompare(b),
-      ),
-    [reglas],
-  )
-
-  const ciudadLimpia = ciudad.trim()
-  const barrioLimpio = barrio.trim() || undefined
-  const tipoLimpio = tipoServicio.trim() || undefined
-  const prioridad = calcularPrioridad(ciudadLimpia, barrioLimpio, tipoLimpio)
-
-  async function handleGuardar() {
-    if (!ciudadLimpia) {
-      setError('La ciudad es obligatoria.')
-      return
-    }
-    if (!tecnicoId) {
-      setError('Selecciona un técnico.')
-      return
-    }
-    setError(null)
-    setGuardando(true)
-    try {
-      await crearRegla({
-        tecnico_id: tecnicoId,
-        ciudad: ciudadLimpia,
-        barrio: barrioLimpio,
-        tipo_servicio: tipoLimpio,
-        prioridad,
-      })
-      setCiudad('')
-      setBarrio('')
-      setTipoServicio('')
-      setTecnicoId('')
-      await onCambio()
-      notificar('Regla de asignación creada.', 'success')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'No se pudo guardar la regla.')
-    } finally {
-      setGuardando(false)
-    }
-  }
+  const reglasFiltradas = useMemo(() => {
+    const q = busquedaRegla.trim().toLowerCase()
+    const ordenadas = [...reglas].sort(
+      (a, b) => a.prioridad - b.prioridad || a.ciudad.localeCompare(b.ciudad),
+    )
+    if (!q) return ordenadas
+    return ordenadas.filter(
+      (r) =>
+        r.ciudad.toLowerCase().includes(q) ||
+        (r.barrio ?? '').toLowerCase().includes(q) ||
+        (r.tipo_servicio ?? '').toLowerCase().includes(q) ||
+        r.tecnico.nombre.toLowerCase().includes(q),
+    )
+  }, [reglas, busquedaRegla])
 
   async function handleEliminar(id: string) {
     setEliminandoId(id)
@@ -117,27 +75,121 @@ export function RulesManagerModal({
     }
   }
 
+  async function handleImportarArchivo(file: File) {
+    setImportando(true)
+    setResultadoImportacion(null)
+    try {
+      // xlsx es pesado: se importa bajo demanda.
+      const { parsearMatrizExcel } = await import('../services/excelParser')
+      const filas = await parsearMatrizExcel(file)
+      if (filas.length === 0) {
+        notificar('No se encontraron filas válidas en la matriz.', 'error')
+        return
+      }
+      const resultado = await importarMatrizDesdeExcel(filas)
+      await onCambio()
+      setResultadoImportacion(resultado)
+      notificar(
+        `${resultado.tecnicosCreados} técnicos y ${resultado.reglasCreadas} reglas importadas con éxito.`,
+        'success',
+      )
+    } catch (e) {
+      notificar(e instanceof Error ? e.message : 'No se pudo importar la matriz.', 'error')
+    } finally {
+      setImportando(false)
+    }
+  }
+
   return (
     <Modal
       abierto={abierto}
       onCerrar={onCerrar}
       titulo="Gestionar Matriz de Asignación"
-      descripcion="Reglas fijas que asignan técnicos por ciudad, barrio y servicio."
-      anchoMaximo="max-w-2xl"
+      descripcion="Importa la matriz por Excel o revisa las reglas activas."
+      anchoMaximo="max-w-3xl"
     >
-      <div className="space-y-6">
+      <div className="space-y-4">
+        {/* Importación masiva */}
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-800">Importación masiva de matriz</p>
+              <p className="text-xs text-slate-500">
+                Lee columnas [Sucursal, Barrio, TECNICO] y, opcionalmente, tipo de servicio.
+              </p>
+            </div>
+            <input
+              ref={inputMatrizRef}
+              type="file"
+              accept=".xlsx,.xls"
+              className="hidden"
+              disabled={importando}
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void handleImportarArchivo(file)
+                e.target.value = ''
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => inputMatrizRef.current?.click()}
+              disabled={importando}
+              className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {importando ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="size-4" />
+              )}
+              Importar Matriz (Excel)
+            </button>
+          </div>
+
+          {resultadoImportacion && (
+            <div className="mt-3 flex flex-col gap-2 rounded-lg bg-emerald-50 p-3 ring-1 ring-emerald-200 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs font-medium text-emerald-800">
+                {resultadoImportacion.tecnicosCreados} técnicos y{' '}
+                {resultadoImportacion.reglasCreadas} reglas importadas con éxito.
+              </p>
+              <button
+                type="button"
+                onClick={onReaplicar}
+                disabled={serviciosAbiertos.length === 0}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw className="size-3.5" />
+                Re-aplicar a Servicios en Pantalla
+              </button>
+            </div>
+          )}
+        </div>
+
         {/* Listado de reglas */}
         <div>
-          <p className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-            Reglas activas ({reglasOrdenadas.length})
-          </p>
-          {reglasOrdenadas.length === 0 ? (
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+              Reglas activas ({reglas.length})
+            </p>
+            <div className="relative w-56">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-slate-400" />
+              <input
+                value={busquedaRegla}
+                onChange={(e) => setBusquedaRegla(e.target.value)}
+                placeholder="Buscar regla…"
+                className="w-full rounded-lg border border-slate-300 bg-white py-1.5 pr-3 pl-8 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+              />
+            </div>
+          </div>
+
+          {reglasFiltradas.length === 0 ? (
             <p className="rounded-lg bg-slate-50 px-3 py-6 text-center text-sm text-slate-500 ring-1 ring-slate-200">
-              Aún no hay reglas. Crea la primera con el formulario de abajo.
+              {reglas.length === 0
+                ? 'Aún no hay reglas. Importa la matriz o usa Gestión Territorial.'
+                : 'Ninguna regla coincide con la búsqueda.'}
             </p>
           ) : (
-            <ul className="max-h-64 space-y-2 overflow-y-auto pr-1">
-              {reglasOrdenadas.map((regla) => (
+            <ul className="max-h-96 space-y-2 overflow-y-auto pr-1">
+              {reglasFiltradas.map((regla) => (
                 <li
                   key={regla.id}
                   className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2"
@@ -161,7 +213,9 @@ export function RulesManagerModal({
                     <p className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
                       <UserRound className="size-3" />
                       {regla.tecnico.nombre}
-                      <span className="text-slate-400">· {PRIORIDAD_LABELS[regla.prioridad]}</span>
+                      <span className="text-slate-400">
+                        · {PRIORIDAD_LABELS[regla.prioridad]}
+                      </span>
                     </p>
                   </div>
                   <button
@@ -181,108 +235,6 @@ export function RulesManagerModal({
               ))}
             </ul>
           )}
-        </div>
-
-        {/* Formulario nueva regla */}
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-          <p className="mb-3 flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-600 uppercase">
-            <Plus className="size-3.5" /> Nueva regla
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-slate-600">
-                Ciudad <span className="text-red-500">*</span>
-              </span>
-              <input
-                list="ciudades-reglas"
-                value={ciudad}
-                onChange={(e) => setCiudad(e.target.value)}
-                placeholder="Ej. Pereira"
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-              />
-              <datalist id="ciudades-reglas">
-                {CIUDADES_SUGERIDAS.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
-            </label>
-
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-slate-600">Barrio</span>
-              <input
-                value={barrio}
-                onChange={(e) => setBarrio(e.target.value)}
-                placeholder="Opcional"
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-              />
-            </label>
-
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-slate-600">
-                Tipo de Servicio
-              </span>
-              <input
-                list="tipos-reglas"
-                value={tipoServicio}
-                onChange={(e) => setTipoServicio(e.target.value)}
-                placeholder="Opcional"
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-              />
-              <datalist id="tipos-reglas">
-                {tiposExistentes.map((t) => (
-                  <option key={t} value={t} />
-                ))}
-              </datalist>
-            </label>
-
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-slate-600">
-                Técnico <span className="text-red-500">*</span>
-              </span>
-              <select
-                value={tecnicoId}
-                onChange={(e) => setTecnicoId(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-              >
-                <option value="">Selecciona un técnico…</option>
-                {tecnicosActivos.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.nombre}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          {/* Vista previa de prioridad */}
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <span
-              className={cn(
-                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ring-1',
-                PRIORIDAD_BADGE[prioridad],
-              )}
-            >
-              <MapPin className="size-3" /> Prioridad {prioridad}: {PRIORIDAD_LABELS[prioridad]}
-            </span>
-            {error && <p className="flex-1 text-right text-xs font-medium text-red-600">{error}</p>}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => void handleGuardar()}
-            disabled={guardando}
-            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300 sm:w-auto"
-          >
-            {guardando ? (
-              <>
-                <Loader2 className="size-4 animate-spin" /> Guardando…
-              </>
-            ) : (
-              <>
-                <Plus className="size-4" /> Guardar Regla
-              </>
-            )}
-          </button>
         </div>
       </div>
     </Modal>

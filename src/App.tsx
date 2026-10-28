@@ -1,30 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Database, FileText, Layers, RefreshCw, ShieldCheck, ShieldAlert, SlidersHorizontal, WifiOff } from 'lucide-react'
+import { ClipboardList, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, SlidersHorizontal, WifiOff } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { FileUpload } from './components/FileUpload'
 import { MetricCards } from './components/MetricCards'
 import { ServiceTable } from './components/ServiceTable'
+import { DirectorioTecnicos } from './components/territorio/DirectorioTecnicos'
+import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
 import { ToastContainer, type Toast, type ToastVariant } from './components/ToastContainer'
 import { RulesManagerModal } from './components/RulesManagerModal'
 import { PdfExportModal } from './components/PdfExportModal'
 import { aplicarMatrizAsignacion } from './services/assignmentEngine'
-import { calcularDiferencialCerrados } from './services/reconciliationEngine'
 import { isSupabaseConfigured } from './lib/supabase'
 import {
   actualizarTecnicoServicio,
-  getLoteLineaBase,
+  getCiudadesActivas,
   getReglas,
-  getServiciosCerrados,
+  getServiciosActivos,
   getTecnicos,
-  guardarNuevoLote,
-  marcarServiciosCerrados,
-  setLoteLineaBase,
+  reasignarServiciosActivos,
+  reemplazarServiciosActivos,
 } from './services/supabaseService'
-import type { LoteCarga, ReglaConTecnico, Servicio, Tecnico } from './types'
+import type { ReglaConTecnico, Servicio, Tecnico } from './types'
 import { cn } from './lib/utils'
 
 type EstadoConexion = 'conectando' | 'conectado' | 'error'
+type VistaPrincipal = 'despacho' | 'territorio'
+
+const TODOS_CIUDAD = 'todos'
 
 const MAX_TOASTS = 4
 
@@ -32,18 +35,23 @@ function App() {
   // Datos
   const [tecnicos, setTecnicos] = useState<Tecnico[]>([])
   const [reglas, setReglas] = useState<ReglaConTecnico[]>([])
-  const [loteActivo, setLoteActivo] = useState<LoteCarga | null>(null)
-  const [serviciosAbiertos, setServiciosAbiertos] = useState<Servicio[]>([])
-  const [serviciosCerrados, setServiciosCerrados] = useState<Servicio[]>([])
+  const [serviciosActivos, setServiciosActivos] = useState<Servicio[]>([])
 
   // UI
   const [cargando, setCargando] = useState(true)
   const [procesando, setProcesando] = useState(false)
+  const [sincronizando, setSincronizando] = useState(false)
   const [conexion, setConexion] = useState<EstadoConexion>('conectando')
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastId = useRef(0)
   const [matrizAbierta, setMatrizAbierta] = useState(false)
   const [pdfAbierto, setPdfAbierto] = useState(false)
+  const [ciudadFiltrada, setCiudadFiltrada] = useState(TODOS_CIUDAD)
+
+  // Navegación principal + Gestión Territorial
+  const [vistaActiva, setVistaActiva] = useState<VistaPrincipal>('despacho')
+  const [tecnicoSeleccionadoId, setTecnicoSeleccionadoId] = useState<string | null>(null)
+  const [ciudadesActivas, setCiudadesActivas] = useState<Record<string, string[]>>({})
 
   const notificar = useCallback((mensaje: string, variant: ToastVariant = 'info') => {
     const id = ++toastId.current
@@ -58,8 +66,9 @@ function App() {
   }, [])
 
   const refrescarReglas = useCallback(async () => {
-    const reglasData = await getReglas()
+    const [reglasData, tecnicosData] = await Promise.all([getReglas(), getTecnicos()])
     setReglas(reglasData)
+    setTecnicos(tecnicosData)
   }, [])
 
   const cargarDatos = useCallback(
@@ -72,18 +81,17 @@ function App() {
         return
       }
       try {
-        const [tecnicosData, reglasData, lineaBase, cerradosData] = await Promise.all([
+        const [tecnicosData, reglasData, serviciosData, ciudadesData] = await Promise.all([
           getTecnicos(),
           getReglas(),
-          getLoteLineaBase(),
-          getServiciosCerrados(),
+          getServiciosActivos(),
+          getCiudadesActivas(),
         ])
 
         setTecnicos(tecnicosData)
         setReglas(reglasData)
-        setServiciosCerrados(cerradosData)
-        setLoteActivo(lineaBase?.lote ?? null)
-        setServiciosAbiertos(lineaBase?.servicios ?? [])
+        setServiciosActivos(serviciosData)
+        setCiudadesActivas(ciudadesData)
         setConexion('conectado')
       } catch (error) {
         // Nunca se propaga: la app sigue montada y muestra el estado de error.
@@ -105,21 +113,51 @@ function App() {
     void cargarDatos()
   }, [cargarDatos])
 
-  const abiertos = useMemo(
-    () => serviciosAbiertos.filter((s) => s.estado === 'ABIERTO'),
-    [serviciosAbiertos],
+  const tecnicoSeleccionado = useMemo(
+    () => tecnicos.find((t) => t.id === tecnicoSeleccionadoId) ?? null,
+    [tecnicos, tecnicoSeleccionadoId],
   )
 
-  const cerrados = useMemo(
-    () => [...serviciosCerrados, ...serviciosAbiertos.filter((s) => s.estado === 'CERRADO')],
-    [serviciosCerrados, serviciosAbiertos],
+  const refrescarTerritorio = useCallback(async () => {
+    const [reglasData, tecnicosData, ciudadesData] = await Promise.all([
+      getReglas(),
+      getTecnicos(),
+      getCiudadesActivas(),
+    ])
+    setReglas(reglasData)
+    setTecnicos(tecnicosData)
+    setCiudadesActivas(ciudadesData)
+  }, [])
+
+  const refrescarServicios = useCallback(async () => {
+    const serviciosData = await getServiciosActivos()
+    setServiciosActivos(serviciosData)
+  }, [])
+
+  // Refresca territorio + servicios tras guardar una cuadrilla.
+  const refrescarTrasGuardarCuadrilla = useCallback(async () => {
+    await Promise.all([refrescarTerritorio(), refrescarServicios()])
+  }, [refrescarTerritorio, refrescarServicios])
+
+  // Refresca el directorio y selecciona al técnico recién creado.
+  const handleTecnicoCreado = useCallback(
+    async (nuevo: Tecnico) => {
+      await refrescarTerritorio()
+      setTecnicoSeleccionadoId(nuevo.id)
+    },
+    [refrescarTerritorio],
   )
+
+  const volverAlDirectorio = useCallback(async () => {
+    setTecnicoSeleccionadoId(null)
+    await refrescarTerritorio()
+  }, [refrescarTerritorio])
 
   const handleReasignar = useCallback(
     async (servicioId: string, tecnicoId: string | null) => {
       // Actualización optimista + rollback ante error.
-      const previos = serviciosAbiertos
-      setServiciosAbiertos((prev) =>
+      const previos = serviciosActivos
+      setServiciosActivos((prev) =>
         prev.map((s) => (s.id === servicioId ? { ...s, tecnico_id: tecnicoId } : s)),
       )
       try {
@@ -129,20 +167,54 @@ function App() {
           : 'Sin asignar'
         notificar(`Técnico actualizado: ${nombreTecnico}.`, 'success')
       } catch (error) {
-        setServiciosAbiertos(previos)
+        setServiciosActivos(previos)
         notificar(
           error instanceof Error ? error.message : 'No se pudo reasignar el técnico.',
           'error',
         )
       }
     },
-    [serviciosAbiertos, tecnicos, notificar],
+    [serviciosActivos, tecnicos, notificar],
   )
 
+  const reaplicarMatriz = useCallback(() => {
+    const reasignados = aplicarMatrizAsignacion(serviciosActivos, reglas)
+    const tecnicoPorOrden = new Map<string, string | null>()
+    for (const servicio of reasignados) {
+      tecnicoPorOrden.set(servicio.numero_orden, servicio.tecnico_id)
+    }
+    setServiciosActivos((prev) =>
+      prev.map((servicio) => {
+        const nuevoTecnico = tecnicoPorOrden.get(servicio.numero_orden)
+        return nuevoTecnico !== undefined ? { ...servicio, tecnico_id: nuevoTecnico } : servicio
+      }),
+    )
+    notificar('Matriz re-aplicada a los servicios en pantalla.', 'success')
+  }, [serviciosActivos, reglas, notificar])
+
+  const handleSincronizar = useCallback(async () => {
+    setSincronizando(true)
+    try {
+      const { asignadas, desasignadas } = await reasignarServiciosActivos()
+      await refrescarServicios()
+      notificar(
+        `Matriz sincronizada: ${asignadas} asignadas, ${desasignadas} liberadas.`,
+        'success',
+      )
+    } catch (error) {
+      notificar(
+        error instanceof Error ? error.message : 'No se pudo sincronizar las asignaciones.',
+        'error',
+      )
+    } finally {
+      setSincronizando(false)
+    }
+  }, [refrescarServicios, notificar])
+
   const handleProcesar = useCallback(
-    async (file: File, ciudadFiltro: string | undefined, esLineaBase: boolean) => {
+    async (file: File, ciudadFiltro: string | undefined) => {
       setProcesando(true)
-      const nombreLote = `${file.name.replace(/\.(xlsx|xls)$/i, '')} — ${format(new Date(), 'dd MMM yyyy HH:mm', { locale: es })}`
+      const nombre = `${file.name.replace(/\.(xlsx|xls)$/i, '')} — ${format(new Date(), 'dd MMM yyyy HH:mm', { locale: es })}`
 
       try {
         // 1. Parseo del Excel (carga diferida: xlsx es un chunk pesado)
@@ -158,35 +230,25 @@ function App() {
           return
         }
 
-        // 2. Asignación automática por cascada
-        const asignados = aplicarMatrizAsignacion(nuevos, reglas)
-
-        // 3. Reconciliación con la Línea Base actual
-        const reciénCerrados = calcularDiferencialCerrados(abiertos, asignados)
-        if (reciénCerrados.length > 0) {
-          await marcarServiciosCerrados(reciénCerrados.map((s) => s.id))
+        // 2. Reglas territoriales activas (si el estado local está vacío, se consulta).
+        let reglasActivas = reglas
+        if (reglasActivas.length === 0) {
+          reglasActivas = await getReglas()
         }
+        console.log(`[Asignacion] Reglas activas disponibles: ${reglasActivas.length}`)
 
-        // 4. Persistencia del nuevo lote
-        const loteId = await guardarNuevoLote(
-          nombreLote,
-          new Date(),
-          asignados,
-          esLineaBase,
-        )
+        // 3. Asignación directa con la matriz.
+        const asignados = aplicarMatrizAsignacion(nuevos, reglasActivas)
 
-        // 5. Si se pide, marcar como línea base activa
-        if (esLineaBase) {
-          await setLoteLineaBase(loteId)
-        }
+        // 4. Reemplazar el despacho activo en Supabase.
+        await reemplazarServiciosActivos(nombre, asignados)
 
-        // 6. Refrescar estado desde el servidor (ids reales, estados, etc.)
+        // 5. Refrescar el estado con los servicios persistidos (ids reales).
         await cargarDatos(true)
 
         const asignadosCount = asignados.filter((s) => s.tecnico_id !== null).length
         notificar(
-          `Lote guardado: ${asignados.length} servicios (${asignadosCount} asignados, ` +
-            `${reciénCerrados.length} cerrados).`,
+          `Despacho listo: ${asignados.length} órdenes (${asignadosCount} asignadas).`,
           'success',
         )
       } catch (error) {
@@ -198,7 +260,7 @@ function App() {
         setProcesando(false)
       }
     },
-    [reglas, abiertos, cargarDatos, notificar],
+    [reglas, cargarDatos, notificar],
   )
 
   const conexionInfo =
@@ -220,21 +282,26 @@ function App() {
               <Layers className="size-5 text-emerald-300" />
             </span>
             <div>
-              <h1 className="text-lg font-bold tracking-tight">TechDispatch Hub</h1>
-              <p className="text-xs text-slate-400">Operación diaria de servicios técnicos</p>
+              <h1 className="text-lg font-bold tracking-tight">
+                <span className="text-white">MillaOps</span>{' '}
+                <span className="bg-gradient-to-r from-cyan-300 to-emerald-300 bg-clip-text text-transparent">
+                  Hub
+                </span>
+              </h1>
+              <p className="text-xs text-slate-400">Seguimiento de Servicios Última Milla</p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Lote activo / Línea Base */}
+            {/* Despacho activo */}
             <div className="flex items-center gap-2 rounded-lg bg-white/5 px-3 py-2 ring-1 ring-white/10">
               <Database className="size-4 shrink-0 text-slate-300" />
               <div className="min-w-0">
                 <p className="text-[10px] font-medium tracking-wide text-slate-400 uppercase">
-                  Línea Base activa
+                  Despacho activo
                 </p>
-                <p className="max-w-[16rem] truncate text-xs font-semibold">
-                  {loteActivo ? loteActivo.nombre : 'Sin línea base'}
+                <p className="text-xs font-semibold tabular-nums">
+                  {serviciosActivos.length} órdenes
                 </p>
               </div>
             </div>
@@ -271,6 +338,16 @@ function App() {
 
             <button
               type="button"
+              onClick={() => void handleSincronizar()}
+              disabled={sincronizando || cargando}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw className={cn('size-4', sincronizando && 'animate-spin')} />
+              Sincronizar Asignaciones
+            </button>
+
+            <button
+              type="button"
               onClick={() => void cargarDatos()}
               disabled={cargando}
               className="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-white ring-1 ring-white/15 transition hover:bg-white/15 disabled:opacity-50"
@@ -278,6 +355,24 @@ function App() {
               <RefreshCw className={cn('size-4', cargando && 'animate-spin')} />
               Actualizar
             </button>
+
+            {/* Firma del autor (discreta, no invasiva) */}
+            <a
+              href="https://github.com/elald3ano"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Diseñado y desarrollado por Daniel Córdoba (@elald3ano)"
+              aria-label="Diseñado y desarrollado por Daniel Córdoba (@elald3ano). Abrir GitHub."
+              className="group inline-flex items-center gap-2 rounded-lg bg-slate-800/60 px-3 py-2 text-xs ring-1 ring-white/10 transition hover:bg-slate-800 hover:ring-white/20"
+            >
+              <CodeXml className="size-4 shrink-0 text-slate-400 transition group-hover:text-white" />
+              <span className="hidden leading-tight sm:block">
+                <span className="block font-semibold text-slate-200">Daniel Córdoba</span>
+                <span className="block text-[10px] text-slate-400">
+                  Asistente Técnico Distrital
+                </span>
+              </span>
+            </a>
           </div>
         </div>
       </header>
@@ -310,19 +405,72 @@ function App() {
           </div>
         ) : (
           <>
-            <MetricCards abiertos={abiertos} cerrados={cerrados} />
+            {/* Pestañas principales */}
+            <nav className="flex w-fit gap-1 rounded-xl bg-white p-1 shadow-sm ring-1 ring-slate-200">
+              {(
+                [
+                  { id: 'despacho', label: 'Despacho en Vivo', icon: ClipboardList },
+                  { id: 'territorio', label: 'Gestión Territorial', icon: MapIcon },
+                ] as const
+              ).map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => {
+                    setVistaActiva(id)
+                    setTecnicoSeleccionadoId(null)
+                    if (id === 'despacho') void refrescarServicios()
+                  }}
+                  className={cn(
+                    'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition',
+                    vistaActiva === id
+                      ? 'bg-slate-900 text-white shadow-sm'
+                      : 'text-slate-600 hover:bg-slate-100',
+                  )}
+                >
+                  <Icon className="size-4" />
+                  {label}
+                </button>
+              ))}
+            </nav>
 
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
-              <ServiceTable
-                abiertos={abiertos}
-                cerrados={cerrados}
-                tecnicos={tecnicos}
-                onReasignar={handleReasignar}
+            {vistaActiva === 'despacho' ? (
+              <>
+                <MetricCards servicios={serviciosActivos} />
+
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+                  <ServiceTable
+                    servicios={serviciosActivos}
+                    tecnicos={tecnicos}
+                    onReasignar={handleReasignar}
+                    notificar={notificar}
+                    onCambioCiudadFiltrada={setCiudadFiltrada}
+                  />
+                  <div className="xl:sticky xl:top-24 xl:self-start">
+                    <FileUpload procesando={procesando} onProcesar={handleProcesar} />
+                  </div>
+                </div>
+              </>
+            ) : tecnicoSeleccionado ? (
+              <DetalleTecnicoTerritorio
+                tecnico={tecnicoSeleccionado}
+                reglas={reglas}
+                servicios={serviciosActivos}
+                ciudadesActivas={ciudadesActivas[tecnicoSeleccionado.id] ?? []}
+                onVolver={() => void volverAlDirectorio()}
+                notificar={notificar}
+                onCambio={refrescarTrasGuardarCuadrilla}
               />
-              <div className="xl:sticky xl:top-24 xl:self-start">
-                <FileUpload procesando={procesando} onProcesar={handleProcesar} />
-              </div>
-            </div>
+            ) : (
+              <DirectorioTecnicos
+                tecnicos={tecnicos}
+                reglas={reglas}
+                ciudadesActivas={ciudadesActivas}
+                onSeleccionar={setTecnicoSeleccionadoId}
+                notificar={notificar}
+                onCreado={handleTecnicoCreado}
+              />
+            )}
           </>
         )}
       </main>
@@ -331,16 +479,18 @@ function App() {
         abierto={matrizAbierta}
         onCerrar={() => setMatrizAbierta(false)}
         reglas={reglas}
-        tecnicos={tecnicos}
+        serviciosAbiertos={serviciosActivos}
         onCambio={refrescarReglas}
         notificar={notificar}
+        onReaplicar={reaplicarMatriz}
       />
 
       <PdfExportModal
         abierto={pdfAbierto}
         onCerrar={() => setPdfAbierto(false)}
-        servicios={abiertos}
+        servicios={serviciosActivos}
         tecnicos={tecnicos}
+        ciudadInicial={ciudadFiltrada}
         notificar={notificar}
       />
 

@@ -1,5 +1,5 @@
 -- =====================================================================
--- TechDispatch Hub — Esquema de Base de Datos (Supabase / PostgreSQL)
+-- MillaOps Hub — Esquema de Base de Datos (Supabase / PostgreSQL)
 -- Script de inicialización completo
 -- =====================================================================
 -- Uso: ejecutar completo en el SQL Editor de Supabase (o vía `supabase db push`).
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tecnicos (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   nombre     TEXT NOT NULL,
   telefono   TEXT,
+  documento  TEXT,
   activo     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -55,6 +56,11 @@ CREATE TABLE IF NOT EXISTS servicios (
   barrio          TEXT NOT NULL,
   direccion       TEXT,
   tipo_servicio   TEXT NOT NULL,
+  nombre_cliente     TEXT,
+  telefono_cliente   TEXT,
+  referencia_pago    TEXT,
+  identificacion     TEXT,
+  estado_sigma       TEXT,
   fecha_creacion  TIMESTAMPTZ NOT NULL,
   dias_antiguedad INTEGER NOT NULL DEFAULT 0,
   tecnico_id      UUID REFERENCES tecnicos (id) ON DELETE SET NULL,

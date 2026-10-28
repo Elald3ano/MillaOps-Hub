@@ -1,34 +1,37 @@
 /**
- * Clasificación de antigüedad / SLA compartida por métricas, badges y filtros.
+ * Clasificación de antigüedad / SLA compartida por métricas, bloques y filtros.
  * Una única fuente de verdad evita inconsistencias entre la tabla y las tarjetas.
  */
 export type SlaLevel = 'ok' | 'warn' | 'critical'
 
-export const SLA_MAX_OK = 2 // 1 a 2 días
-export const SLA_MAX_WARN = 5 // 3 a 5 días
-
+/**
+ * Semáforo de SLA (estilo Looker Studio):
+ *  🟢 verde    → <= 1 día  (al día)
+ *  🟡 amarillo → 2 días    (atención)
+ *  🔴 rojo     → >= 3 días (crítico)
+ */
 export function clasificarSla(dias: number): SlaLevel {
-  if (dias <= SLA_MAX_OK) return 'ok'
-  if (dias <= SLA_MAX_WARN) return 'warn'
+  if (dias <= 1) return 'ok'
+  if (dias === 2) return 'warn'
   return 'critical'
 }
 
-/** Órdenes "críticas": más de 5 días (alimenta badge, KPI y filtro de PDF). */
+/** Órdenes "críticas": 3 o más días (alimenta bloque, KPI y filtro de PDF). */
 export function esCritica(dias: number): boolean {
-  return dias > SLA_MAX_WARN
+  return dias >= 3
 }
 
 export const SLA_LABELS: Record<SlaLevel, string> = {
-  ok: '1 a 2 días',
-  warn: '3 a 5 días',
-  critical: '+5 días (Crítico)',
+  ok: '1 día',
+  warn: '2 días',
+  critical: '3+ días',
 }
 
-/** Clases de Tailwind por nivel de SLA (badges y textos). */
+/** Clases de Tailwind del bloque sólido por nivel de SLA (semáforo). */
 export const SLA_BADGE_CLASSES: Record<SlaLevel, string> = {
-  ok: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
-  warn: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
-  critical: 'bg-red-50 text-red-700 ring-1 ring-red-200',
+  ok: 'bg-emerald-600 text-white',
+  warn: 'bg-yellow-400 text-slate-900',
+  critical: 'bg-red-600 text-white',
 }
 
 /** Rango de días de los filtros de SLA. */

@@ -16,6 +16,7 @@ export type Database = {
           id: string
           nombre: string
           telefono: string | null
+          documento: string | null
           activo: boolean
           created_at: string
         }
@@ -23,6 +24,7 @@ export type Database = {
           id?: string
           nombre: string
           telefono?: string | null
+          documento?: string | null
           activo?: boolean
           created_at?: string
         }
@@ -30,6 +32,7 @@ export type Database = {
           id?: string
           nombre?: string
           telefono?: string | null
+          documento?: string | null
           activo?: boolean
           created_at?: string
         }
@@ -61,6 +64,27 @@ export type Database = {
           barrio?: string | null
           tipo_servicio?: string | null
           prioridad?: number
+          created_at?: string
+        }
+        Relationships: []
+      }
+      tecnicos_ciudades: {
+        Row: {
+          id: string
+          tecnico_id: string
+          ciudad: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          tecnico_id: string
+          ciudad: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          tecnico_id?: string
+          ciudad?: string
           created_at?: string
         }
         Relationships: []
@@ -101,6 +125,11 @@ export type Database = {
           barrio: string
           direccion: string | null
           tipo_servicio: string
+          nombre_cliente: string | null
+          telefono_cliente: string | null
+          referencia_pago: string | null
+          identificacion: string | null
+          estado_sigma: string | null
           fecha_creacion: string
           dias_antiguedad: number
           tecnico_id: string | null
@@ -115,6 +144,11 @@ export type Database = {
           barrio: string
           direccion?: string | null
           tipo_servicio: string
+          nombre_cliente?: string | null
+          telefono_cliente?: string | null
+          referencia_pago?: string | null
+          identificacion?: string | null
+          estado_sigma?: string | null
           fecha_creacion: string
           dias_antiguedad?: number
           tecnico_id?: string | null
@@ -129,6 +163,11 @@ export type Database = {
           barrio?: string
           direccion?: string | null
           tipo_servicio?: string
+          nombre_cliente?: string | null
+          telefono_cliente?: string | null
+          referencia_pago?: string | null
+          identificacion?: string | null
+          estado_sigma?: string | null
           fecha_creacion?: string
           dias_antiguedad?: number
           tecnico_id?: string | null

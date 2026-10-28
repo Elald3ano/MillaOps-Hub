@@ -21,7 +21,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    console.error('[TechDispatch Hub] Error no controlado en el render:', error, info.componentStack)
+    console.error('[MillaOps Hub] Error no controlado en el render:', error, info.componentStack)
   }
 
   private reintentar = (): void => {

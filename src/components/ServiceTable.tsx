@@ -1,13 +1,21 @@
 import { useMemo, useState } from 'react'
+import { format } from 'date-fns'
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
-  CheckCircle2,
+  ArrowUp,
+  ArrowUpDown,
   ChevronDown,
+  FileDown,
   Inbox,
   Loader2,
+  MapPin,
+  Phone,
   Search,
   SlidersHorizontal,
+  User,
+  Wrench,
 } from 'lucide-react'
 import type { Servicio, Tecnico } from '../types'
 import { cn } from '../lib/utils'
@@ -17,38 +25,80 @@ import {
   clasificarSla,
   type RangoSla,
 } from '../lib/sla'
+import { MultiSelectFilter, type MultiSelectOpcion } from './MultiSelectFilter'
 
 const ITEMS_POR_PAGINA = 50
-const SIN_ASIGNAR = '__sin_asignar__'
+const SIN_ASIGNAR = 'sin_asignar'
+const TODOS = 'todos'
 
-interface ServiceTableProps {
-  abiertos: Servicio[]
-  cerrados: Servicio[]
-  tecnicos: Tecnico[]
-  onReasignar: (servicioId: string, tecnicoId: string | null) => Promise<void>
+type ColumnaOrden =
+  | 'antiguedad'
+  | 'orden'
+  | 'ciudad'
+  | 'barrio'
+  | 'cliente'
+  | 'servicio'
+  | 'tecnico'
+
+interface OrdenState {
+  columna: ColumnaOrden
+  direccion: 'asc' | 'desc'
 }
 
-type Tab = 'abiertas' | 'cerradas'
+interface ServiceTableProps {
+  servicios: Servicio[]
+  tecnicos: Tecnico[]
+  onReasignar: (servicioId: string, tecnicoId: string | null) => Promise<void>
+  notificar: (mensaje: string, variant?: 'info' | 'success' | 'error') => void
+  /** Notifica la ciudad filtrada para pre-llenar el exportador de PDF. */
+  onCambioCiudadFiltrada?: (ciudad: string) => void
+}
 
 interface FiltrosState {
   busqueda: string
-  tecnico: string
-  tipoServicio: string
+  ciudades: string[]
+  tecnicos: string[]
+  servicios: string[]
   rangoSla: RangoSla
 }
 
 const FILTROS_INICIALES: FiltrosState = {
   busqueda: '',
-  tecnico: 'todos',
-  tipoServicio: 'todos',
+  ciudades: [],
+  tecnicos: [],
+  servicios: [],
   rangoSla: 'todos',
+}
+
+/** Normaliza un id de técnico para comparar sin depender de espacios/case. */
+function normalizarId(valor: string | null | undefined): string {
+  return (valor ?? '').trim().toLowerCase()
+}
+
+/** Coincidencia de la búsqueda global sobre los campos de una orden. */
+function coincideBusqueda(s: Servicio, busqueda: string): boolean {
+  if (!busqueda) return true
+  return (
+    s.numero_orden.toLowerCase().includes(busqueda) ||
+    s.barrio.toLowerCase().includes(busqueda) ||
+    (s.direccion ?? '').toLowerCase().includes(busqueda) ||
+    s.tipo_servicio.toLowerCase().includes(busqueda)
+  )
+}
+
+/** Coincidencia del filtro de técnicos (multi-selección, incluye "sin asignar"). */
+function coincideTecnico(s: Servicio, tecnicosSeleccionados: string[]): boolean {
+  if (tecnicosSeleccionados.length === 0) return true
+  const idServicio = normalizarId(s.tecnico_id)
+  if (tecnicosSeleccionados.includes(SIN_ASIGNAR) && idServicio === '') return true
+  return idServicio !== '' && tecnicosSeleccionados.includes(idServicio)
 }
 
 const RANGOS_SLA: { value: RangoSla; label: string }[] = [
   { value: 'todos', label: 'Todos los días' },
-  { value: 'ok', label: '1 a 2 días' },
-  { value: 'warn', label: '3 a 5 días' },
-  { value: 'critical', label: '+5 días (Críticos)' },
+  { value: 'ok', label: '🟢 1 día (Al día)' },
+  { value: 'warn', label: '🟡 2 días (Atención)' },
+  { value: 'critical', label: '🔴 3+ días (Críticos)' },
 ]
 
 function SelectFiltro({
@@ -82,19 +132,10 @@ function BadgeSla({ dias }: { dias: number }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums',
+        'inline-block rounded-md px-2.5 py-1 text-center text-xs font-bold shadow-xs tabular-nums',
         SLA_BADGE_CLASSES[nivel],
-        nivel === 'critical' && 'animate-pulse',
       )}
     >
-      <span
-        className={cn(
-          'size-1.5 rounded-full',
-          nivel === 'ok' && 'bg-emerald-500',
-          nivel === 'warn' && 'bg-amber-500',
-          nivel === 'critical' && 'bg-red-500',
-        )}
-      />
       {dias} {dias === 1 ? 'día' : 'días'}
     </span>
   )
@@ -120,12 +161,58 @@ function EstadoVacio({
   )
 }
 
-/** Tabla de servicios estilo Looker con filtros, tabs y paginación. */
-export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: ServiceTableProps) {
-  const [tab, setTab] = useState<Tab>('abiertas')
+/** Encabezado de columna clicable para ordenamiento interactivo. */
+function ThOrdenable({
+  label,
+  columna,
+  orden,
+  onOrdenar,
+}: {
+  label: string
+  columna: ColumnaOrden
+  orden: OrdenState
+  onOrdenar: (columna: ColumnaOrden) => void
+}) {
+  const activa = orden.columna === columna
+  return (
+    <th
+      scope="col"
+      onClick={() => onOrdenar(columna)}
+      className="cursor-pointer px-4 py-3 select-none transition hover:bg-slate-50"
+      aria-sort={activa ? (orden.direccion === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {activa ? (
+          orden.direccion === 'asc' ? (
+            <ArrowUp className="size-[13px] text-slate-900" />
+          ) : (
+            <ArrowDown className="size-[13px] text-slate-900" />
+          )
+        ) : (
+          <ArrowUpDown className="size-[13px] text-slate-300" />
+        )}
+      </span>
+    </th>
+  )
+}
+
+/** Tabla de servicios estilo Looker con filtros, orden y paginación. */
+export function ServiceTable({
+  servicios,
+  tecnicos,
+  onReasignar,
+  notificar,
+  onCambioCiudadFiltrada,
+}: ServiceTableProps) {
   const [filtros, setFiltros] = useState<FiltrosState>(FILTROS_INICIALES)
   const [pagina, setPagina] = useState(1)
   const [guardandoId, setGuardandoId] = useState<string | null>(null)
+  const [orden, setOrden] = useState<OrdenState>({
+    columna: 'antiguedad',
+    direccion: 'desc',
+  })
+  const [exportando, setExportando] = useState(false)
 
   const tecnicosActivos = useMemo(
     () => tecnicos.filter((t) => t.activo).sort((a, b) => a.nombre.localeCompare(b.nombre)),
@@ -137,52 +224,161 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
     [tecnicos],
   )
 
-  const fuente = tab === 'abiertas' ? abiertos : cerrados
-
-  const tiposServicio = useMemo(
-    () => Array.from(new Set(fuente.map((s) => s.tipo_servicio))).sort((a, b) => a.localeCompare(b)),
-    [fuente],
+  /** Nombre legible de un técnico por su id (o "Sin asignar"). */
+  const nombrePorId = useMemo(
+    () => new Map(tecnicos.map((t) => [normalizarId(t.id), t.nombre] as const)),
+    [tecnicos],
   )
+
+  /**
+   * FILTROS EN CASCADA — cada multi-selector depende del resto:
+   * · Ciudad   → depende de técnicos + servicios + búsqueda
+   * · Técnico  → depende de ciudades + servicios + búsqueda
+   * · Servicio → depende de ciudades + técnicos + búsqueda
+   * (El SLA se aplica al final para no vaciar los selectores en cascada.)
+   */
+
+  // Base para Ciudad: todo excepto el propio filtro de ciudades.
+  const baseCiudad = useMemo(
+    () =>
+      servicios.filter(
+        (s) =>
+          coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
+          coincideTecnico(s, filtros.tecnicos) &&
+          (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)),
+      ),
+    [servicios, filtros.busqueda, filtros.tecnicos, filtros.servicios],
+  )
+
+  // Base para Técnico: todo excepto el propio filtro de técnicos.
+  const baseTecnico = useMemo(
+    () =>
+      servicios.filter(
+        (s) =>
+          coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
+          (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+          (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)),
+      ),
+    [servicios, filtros.busqueda, filtros.ciudades, filtros.servicios],
+  )
+
+  // Base para Tipo de servicio: todo excepto el propio filtro de servicios.
+  const baseTipo = useMemo(
+    () =>
+      servicios.filter(
+        (s) =>
+          coincideBusqueda(s, filtros.busqueda.trim().toLowerCase()) &&
+          (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+          coincideTecnico(s, filtros.tecnicos),
+      ),
+    [servicios, filtros.busqueda, filtros.ciudades, filtros.tecnicos],
+  )
+
+  /** Ciudades disponibles con su conteo, según los demás filtros. */
+  const opcionesCiudad = useMemo<MultiSelectOpcion[]>(() => {
+    const conteo = new Map<string, number>()
+    for (const s of baseCiudad) {
+      conteo.set(s.ciudad, (conteo.get(s.ciudad) ?? 0) + 1)
+    }
+    return [...conteo.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([ciudad, cantidad]) => ({ id: ciudad, label: ciudad, count: cantidad }))
+  }, [baseCiudad])
+
+  /** Técnicos con órdenes en el contexto actual (incluye "Sin Asignar"). */
+  const opcionesTecnico = useMemo<MultiSelectOpcion[]>(() => {
+    const conteo = new Map<string, number>()
+    let sinAsignar = 0
+    for (const s of baseTecnico) {
+      const id = normalizarId(s.tecnico_id)
+      if (!id) sinAsignar++
+      else conteo.set(id, (conteo.get(id) ?? 0) + 1)
+    }
+
+    const lista: MultiSelectOpcion[] = []
+    if (sinAsignar > 0) {
+      lista.push({ id: SIN_ASIGNAR, label: 'Sin Asignar', count: sinAsignar })
+    }
+    for (const [id, cantidad] of conteo.entries()) {
+      lista.push({ id, label: nombrePorId.get(id) ?? 'Técnico', count: cantidad })
+    }
+    return lista.sort((a, b) => a.label.localeCompare(b.label))
+  }, [baseTecnico, nombrePorId])
+
+  /** Tipos de servicio en la intersección ciudades × técnicos. */
+  const opcionesTipo = useMemo<MultiSelectOpcion[]>(() => {
+    const conteo = new Map<string, number>()
+    for (const s of baseTipo) {
+      conteo.set(s.tipo_servicio, (conteo.get(s.tipo_servicio) ?? 0) + 1)
+    }
+    return [...conteo.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([tipo, cantidad]) => ({ id: tipo, label: tipo, count: cantidad }))
+  }, [baseTipo])
 
   const filtrados = useMemo(() => {
     const busqueda = filtros.busqueda.trim().toLowerCase()
-    return fuente.filter((s) => {
-      if (busqueda) {
-        const coincide =
-          s.numero_orden.toLowerCase().includes(busqueda) ||
-          s.barrio.toLowerCase().includes(busqueda) ||
-          (s.direccion ?? '').toLowerCase().includes(busqueda) ||
-          s.tipo_servicio.toLowerCase().includes(busqueda)
-        if (!coincide) return false
+    return servicios.filter(
+      (s) =>
+        coincideBusqueda(s, busqueda) &&
+        (filtros.ciudades.length === 0 || filtros.ciudades.includes(s.ciudad)) &&
+        coincideTecnico(s, filtros.tecnicos) &&
+        (filtros.servicios.length === 0 || filtros.servicios.includes(s.tipo_servicio)) &&
+        coincideRangoSla(s.dias_antiguedad, filtros.rangoSla),
+    )
+  }, [servicios, filtros])
+
+  // Ordenamiento interactivo sobre el arreglo filtrado.
+  const ordenados = useMemo(() => {
+    const factor = orden.direccion === 'asc' ? 1 : -1
+    const nombreTecnico = (s: Servicio): string =>
+      s.tecnico_id ? (nombrePorId.get(normalizarId(s.tecnico_id)) ?? '') : ''
+
+    return [...filtrados].sort((a, b) => {
+      let cmp = 0
+      switch (orden.columna) {
+        case 'antiguedad':
+          cmp = a.dias_antiguedad - b.dias_antiguedad
+          break
+        case 'orden':
+          cmp = a.numero_orden.localeCompare(b.numero_orden, undefined, { numeric: true })
+          break
+        case 'ciudad':
+          cmp = a.ciudad.localeCompare(b.ciudad)
+          break
+        case 'barrio':
+          cmp = a.barrio.localeCompare(b.barrio)
+          break
+        case 'cliente':
+          cmp = (a.nombre_cliente ?? '').localeCompare(b.nombre_cliente ?? '')
+          break
+        case 'servicio':
+          cmp = a.tipo_servicio.localeCompare(b.tipo_servicio)
+          break
+        case 'tecnico':
+          cmp = nombreTecnico(a).localeCompare(nombreTecnico(b))
+          break
+        default:
+          cmp = 0
       }
-
-      if (filtros.tecnico === SIN_ASIGNAR) {
-        if (s.tecnico_id !== null) return false
-      } else if (filtros.tecnico !== 'todos' && s.tecnico_id !== filtros.tecnico) {
-        return false
-      }
-
-      if (filtros.tipoServicio !== 'todos' && s.tipo_servicio !== filtros.tipoServicio) return false
-
-      if (!coincideRangoSla(s.dias_antiguedad, filtros.rangoSla)) return false
-
-      return true
+      return cmp * factor
     })
-  }, [fuente, filtros])
+  }, [filtrados, orden, nombrePorId])
 
-  const totalPaginas = Math.max(1, Math.ceil(filtrados.length / ITEMS_POR_PAGINA))
+  const totalPaginas = Math.max(1, Math.ceil(ordenados.length / ITEMS_POR_PAGINA))
   // Clamp en render: evita un efecto de sincronización si el resultado se reduce.
   const paginaActual = Math.min(pagina, totalPaginas)
 
   const visibles = useMemo(() => {
     const inicio = (paginaActual - 1) * ITEMS_POR_PAGINA
-    return filtrados.slice(inicio, inicio + ITEMS_POR_PAGINA)
-  }, [filtrados, paginaActual])
+    return ordenados.slice(inicio, inicio + ITEMS_POR_PAGINA)
+  }, [ordenados, paginaActual])
 
   const hayFiltrosActivos =
     filtros.busqueda !== '' ||
-    filtros.tecnico !== 'todos' ||
-    filtros.tipoServicio !== 'todos' ||
+    filtros.ciudades.length > 0 ||
+    filtros.tecnicos.length > 0 ||
+    filtros.servicios.length > 0 ||
     filtros.rangoSla !== 'todos'
 
   function actualizarFiltro<K extends keyof FiltrosState>(clave: K, valor: FiltrosState[K]) {
@@ -190,9 +386,68 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
     setPagina(1)
   }
 
-  function cambiarTab(nuevoTab: Tab) {
-    setTab(nuevoTab)
+  /** Actualiza el multi-selector de ciudades y sincroniza el pre-llenado del PDF. */
+  function cambiarCiudades(nuevas: string[]) {
+    setFiltros((prev) => ({ ...prev, ciudades: nuevas }))
     setPagina(1)
+    onCambioCiudadFiltrada?.(nuevas.length === 1 ? nuevas[0] : TODOS)
+  }
+
+  /** Actualiza el multi-selector de técnicos. */
+  function cambiarTecnicos(nuevos: string[]) {
+    setFiltros((prev) => ({ ...prev, tecnicos: nuevos }))
+    setPagina(1)
+  }
+
+  /** Actualiza el multi-selector de tipos de servicio. */
+  function cambiarServicios(nuevos: string[]) {
+    setFiltros((prev) => ({ ...prev, servicios: nuevos }))
+    setPagina(1)
+  }
+
+  function limpiarFiltros() {
+    setFiltros(FILTROS_INICIALES)
+    setPagina(1)
+    onCambioCiudadFiltrada?.(TODOS)
+  }
+
+  function ordenarPor(columna: ColumnaOrden) {
+    setOrden((prev) => {
+      if (prev.columna === columna) {
+        return { columna, direccion: prev.direccion === 'asc' ? 'desc' : 'asc' }
+      }
+      // Columna nueva: antigüedad arranca descendente (lo crítico primero); el resto ascendente.
+      return { columna, direccion: columna === 'antiguedad' ? 'desc' : 'asc' }
+    })
+  }
+
+  async function exportarVista() {
+    if (ordenados.length === 0) return
+    setExportando(true)
+    try {
+      const { exportarVistaActualPdf } = await import('../services/pdfGenerator')
+      const ciudadActiva = filtros.ciudades.length === 0 ? 'Todas' : filtros.ciudades.join(', ')
+      const tecnicoActivo =
+        filtros.tecnicos.length === 0
+          ? 'Todos'
+          : filtros.tecnicos
+              .map((t) => (t === SIN_ASIGNAR ? 'Sin Asignar' : (nombrePorId.get(t) ?? t)))
+              .join(', ')
+
+      const doc = await exportarVistaActualPdf(ordenados, tecnicos, {
+        conteo: ordenados.length,
+        ciudad: ciudadActiva,
+        tecnico: tecnicoActivo,
+        columna: orden.columna,
+        direccion: orden.direccion,
+      })
+      doc.save(`vista-tactica-${format(new Date(), 'yyyy-MM-dd-HHmm')}.pdf`)
+      notificar('Vista exportada correctamente.', 'success')
+    } catch (error) {
+      notificar(error instanceof Error ? error.message : 'No se pudo exportar la vista.', 'error')
+    } finally {
+      setExportando(false)
+    }
   }
 
   async function handleCambiarTecnico(servicioId: string, valor: string) {
@@ -210,52 +465,8 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-slate-200 px-3 pt-3">
-        {(
-          [
-            { id: 'abiertas', label: 'Órdenes Abiertas', count: abiertos.length, icon: Inbox },
-            {
-              id: 'cerradas',
-              label: 'Órdenes Cerradas / Reconciliadas',
-              count: cerrados.length,
-              icon: CheckCircle2,
-            },
-          ] as const
-        ).map(({ id, label, count, icon: Icon }) => {
-          const activo = tab === id
-          return (
-            <button
-              key={id}
-              type="button"
-              onClick={() => cambiarTab(id)}
-              aria-selected={activo}
-              role="tab"
-              className={cn(
-                'flex items-center gap-2 rounded-t-lg border-b-2 px-3 py-2 text-sm font-medium transition',
-                activo
-                  ? 'border-slate-900 text-slate-900'
-                  : 'border-transparent text-slate-500 hover:text-slate-700',
-              )}
-            >
-              <Icon className="size-4" />
-              <span className="hidden sm:inline">{label}</span>
-              <span className="sm:hidden">{id === 'abiertas' ? 'Abiertas' : 'Cerradas'}</span>
-              <span
-                className={cn(
-                  'rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums',
-                  activo ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600',
-                )}
-              >
-                {count}
-              </span>
-            </button>
-          )
-        })}
-      </div>
-
       {/* Barra de control */}
-      <div className="grid gap-3 border-b border-slate-200 bg-slate-50/60 p-3 md:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_repeat(3,minmax(0,1fr))]">
+      <div className="grid gap-3 border-b border-slate-200 bg-slate-50/60 p-3 md:grid-cols-2 xl:grid-cols-[minmax(0,2fr)_repeat(4,minmax(0,1fr))]">
         <div className="relative">
           <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-slate-400" />
           <input
@@ -268,32 +479,32 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
           />
         </div>
 
-        <SelectFiltro
-          ariaLabel="Filtrar por técnico"
-          value={filtros.tecnico}
-          onChange={(v) => actualizarFiltro('tecnico', v)}
-        >
-          <option value="todos">Todos los técnicos</option>
-          <option value={SIN_ASIGNAR}>Sin Asignar</option>
-          {tecnicosActivos.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.nombre}
-            </option>
-          ))}
-        </SelectFiltro>
+        <MultiSelectFilter
+          label="Ciudad / Sucursal"
+          opciones={opcionesCiudad}
+          seleccionados={filtros.ciudades}
+          onSeleccionChange={cambiarCiudades}
+          placeholderTodos="Todas las ciudades"
+          icono={MapPin}
+        />
 
-        <SelectFiltro
-          ariaLabel="Filtrar por tipo de servicio"
-          value={filtros.tipoServicio}
-          onChange={(v) => actualizarFiltro('tipoServicio', v)}
-        >
-          <option value="todos">Todos los servicios</option>
-          {tiposServicio.map((tipo) => (
-            <option key={tipo} value={tipo}>
-              {tipo}
-            </option>
-          ))}
-        </SelectFiltro>
+        <MultiSelectFilter
+          label="Técnico Asignado"
+          opciones={opcionesTecnico}
+          seleccionados={filtros.tecnicos}
+          onSeleccionChange={cambiarTecnicos}
+          placeholderTodos="Todos los técnicos"
+          icono={User}
+        />
+
+        <MultiSelectFilter
+          label="Tipo de Servicio"
+          opciones={opcionesTipo}
+          seleccionados={filtros.servicios}
+          onSeleccionChange={cambiarServicios}
+          placeholderTodos="Todos los servicios"
+          icono={Wrench}
+        />
 
         <SelectFiltro
           ariaLabel="Filtrar por rango de días"
@@ -308,45 +519,49 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
         </SelectFiltro>
       </div>
 
-      {hayFiltrosActivos && (
-        <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 text-xs text-slate-500">
-          <span className="inline-flex items-center gap-1.5">
-            <SlidersHorizontal className="size-3.5" />
-            {filtrados.length} de {fuente.length} órdenes visibles
-          </span>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 text-xs text-slate-500">
+        <span className="inline-flex items-center gap-1.5">
+          {hayFiltrosActivos && <SlidersHorizontal className="size-3.5" />}
+          {filtrados.length} de {servicios.length} órdenes visibles
+        </span>
+        <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={() => {
-              setFiltros(FILTROS_INICIALES)
-              setPagina(1)
-            }}
-            className="font-medium text-slate-700 underline-offset-2 hover:underline"
+            onClick={() => void exportarVista()}
+            disabled={exportando || ordenados.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Limpiar filtros
+            {exportando ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <FileDown className="size-3.5" />
+            )}
+            Exportar esta vista
           </button>
+          {hayFiltrosActivos && (
+            <button
+              type="button"
+              onClick={limpiarFiltros}
+              className="font-medium text-slate-700 underline-offset-2 hover:underline"
+            >
+              Limpiar filtros
+            </button>
+          )}
         </div>
-      )}
+      </div>
 
       {/* Tabla */}
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-left text-sm">
+        <table className="w-full min-w-[980px] text-left text-sm">
           <thead className="border-b border-slate-200 bg-white text-xs font-semibold tracking-wide text-slate-500 uppercase">
             <tr>
-              <th scope="col" className="px-4 py-3">
-                Orden #
-              </th>
-              <th scope="col" className="px-4 py-3">
-                Barrio / Dirección
-              </th>
-              <th scope="col" className="px-4 py-3">
-                Tipo de Servicio
-              </th>
-              <th scope="col" className="px-4 py-3">
-                Antigüedad
-              </th>
-              <th scope="col" className="px-4 py-3">
-                Técnico Asignado
-              </th>
+              <ThOrdenable label="Antigüedad" columna="antiguedad" orden={orden} onOrdenar={ordenarPor} />
+              <ThOrdenable label="Orden #" columna="orden" orden={orden} onOrdenar={ordenarPor} />
+              <ThOrdenable label="Ciudad" columna="ciudad" orden={orden} onOrdenar={ordenarPor} />
+              <ThOrdenable label="Barrio / Dirección" columna="barrio" orden={orden} onOrdenar={ordenarPor} />
+              <ThOrdenable label="Cliente / Contacto" columna="cliente" orden={orden} onOrdenar={ordenarPor} />
+              <ThOrdenable label="Tipo de Servicio" columna="servicio" orden={orden} onOrdenar={ordenarPor} />
+              <ThOrdenable label="Técnico Asignado" columna="tecnico" orden={orden} onOrdenar={ordenarPor} />
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -354,22 +569,39 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
               const guardando = guardandoId === servicio.id
               return (
                 <tr key={servicio.id} className="transition hover:bg-slate-50/80">
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <BadgeSla dias={servicio.dias_antiguedad} />
+                  </td>
                   <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-900 whitespace-nowrap">
                     {servicio.numero_orden}
                   </td>
+                  <td className="px-4 py-3 text-sm font-medium whitespace-nowrap text-slate-700">
+                    {servicio.ciudad}
+                  </td>
                   <td className="px-4 py-3">
                     <p className="font-medium text-slate-800">{servicio.barrio}</p>
-                    <p className="max-w-[22rem] truncate text-xs text-slate-500">
+                    <p className="max-w-[20rem] truncate text-xs text-slate-500">
                       {servicio.direccion ?? '—'}
                     </p>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="max-w-[16rem] space-y-0.5">
+                      <p className="truncate text-xs font-semibold tracking-wide text-slate-800 uppercase">
+                        {servicio.nombre_cliente || 'SIN NOMBRE'}
+                      </p>
+                      <p className="flex items-center gap-1 text-xs text-slate-600">
+                        <Phone className="size-3 shrink-0 text-slate-400" />
+                        {servicio.telefono_cliente || 'S/T'}
+                      </p>
+                      <p className="truncate text-[11px] text-slate-400">
+                        Ref: {servicio.referencia_pago || 'S/R'}
+                      </p>
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-slate-600">
                     <span className="inline-flex rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
                       {servicio.tipo_servicio}
                     </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <BadgeSla dias={servicio.dias_antiguedad} />
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
@@ -378,7 +610,7 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
                           aria-label={`Técnico asignado a la orden ${servicio.numero_orden}`}
                           value={servicio.tecnico_id ?? SIN_ASIGNAR}
                           onChange={(e) => void handleCambiarTecnico(servicio.id, e.target.value)}
-                          disabled={guardando || tab === 'cerradas'}
+                          disabled={guardando}
                           className={cn(
                             'w-44 appearance-none rounded-lg border py-1.5 pr-7 pl-2.5 text-xs font-medium shadow-sm outline-none transition focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:opacity-60',
                             servicio.tecnico_id
@@ -394,7 +626,9 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
                           ))}
                           {/* Técnico inactivo pero aún asignado: se conserva en la lista */}
                           {servicio.tecnico_id &&
-                            !tecnicosActivos.some((t) => t.id === servicio.tecnico_id) && (
+                            !tecnicosActivos.some(
+                              (t) => normalizarId(t.id) === normalizarId(servicio.tecnico_id),
+                            ) && (
                               <option value={servicio.tecnico_id}>
                                 {tecnicosPorId.get(servicio.tecnico_id)?.nombre ?? 'Técnico'}
                               </option>
@@ -413,14 +647,14 @@ export function ServiceTable({ abiertos, cerrados, tecnicos, onReasignar }: Serv
 
         {visibles.length === 0 && (
           <EstadoVacio
-            icon={tab === 'abiertas' ? Inbox : CheckCircle2}
+            icon={Inbox}
             titulo={
-              fuente.length === 0
+              servicios.length === 0
                 ? 'Sin datos para mostrar'
                 : 'Ninguna orden coincide con los filtros'
             }
             detalle={
-              fuente.length === 0
+              servicios.length === 0
                 ? 'Carga un archivo de servicios para comenzar a operar.'
                 : 'Ajusta el buscador o los filtros para ver resultados.'
             }

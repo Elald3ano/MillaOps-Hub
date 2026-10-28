@@ -28,7 +28,7 @@ const keyValida = Boolean(envKey && envKey.trim().length > 20)
  */
 if (!urlValida || !keyValida) {
   console.warn(
-    '[TechDispatch Hub] Supabase no está configurado. ' +
+    '[MillaOps Hub] Supabase no está configurado. ' +
       'Faltan VITE_SUPABASE_URL y/o VITE_SUPABASE_ANON_KEY (copia .env.example a .env). ' +
       'La aplicación arrancará en modo sin conexión.',
   )

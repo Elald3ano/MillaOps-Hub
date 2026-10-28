@@ -4,7 +4,7 @@ import { format } from 'date-fns'
 import { Modal } from './Modal'
 import { esCritica } from '../lib/sla'
 import type { PlanillaTecnico } from '../services/pdfGenerator'
-import { CIUDADES_SUGERIDAS } from '../lib/sla'
+import { limpiarTexto } from '../lib/normalizer'
 import { cn } from '../lib/utils'
 import type { Servicio, Tecnico } from '../types'
 import type { ToastVariant } from './ToastContainer'
@@ -14,10 +14,14 @@ interface PdfExportModalProps {
   onCerrar: () => void
   servicios: Servicio[]
   tecnicos: Tecnico[]
+  /** Ciudad actualmente filtrada en la tabla (para pre-seleccionarla). */
+  ciudadInicial?: string
   notificar: (mensaje: string, variant?: ToastVariant) => void
 }
 
 type Modo = 'consolidado' | 'especifico'
+
+const TODAS = 'todas'
 
 /** Modal de exportación de planillas de trabajo en PDF. */
 export function PdfExportModal({
@@ -25,50 +29,58 @@ export function PdfExportModal({
   onCerrar,
   servicios,
   tecnicos,
+  ciudadInicial,
   notificar,
 }: PdfExportModalProps) {
   const [modo, setModo] = useState<Modo>('consolidado')
   const [tecnicoId, setTecnicoId] = useState('')
   const [soloCriticas, setSoloCriticas] = useState(false)
-  const [ciudad, setCiudad] = useState('')
+  const [ciudad, setCiudad] = useState(() =>
+    ciudadInicial && ciudadInicial !== TODAS ? ciudadInicial : TODAS,
+  )
   const [generando, setGenerando] = useState(false)
 
-  // Ciudad más frecuente entre las órdenes abiertas (para el encabezado).
-  const ciudadPredeterminada = useMemo(() => {
-    const conteo = new Map<string, number>()
-    for (const s of servicios) conteo.set(s.ciudad, (conteo.get(s.ciudad) ?? 0) + 1)
-    let mejor = ''
-    let max = 0
-    for (const [c, n] of conteo) {
-      if (n > max) {
-        max = n
-        mejor = c
-      }
+  // Ciudades presentes en el despacho, con su conteo real de órdenes.
+  const opcionesCiudad = useMemo(() => {
+    const conteo = new Map<string, { nombre: string; total: number }>()
+    for (const s of servicios) {
+      const clave = limpiarTexto(s.ciudad)
+      const actual = conteo.get(clave)
+      if (actual) actual.total++
+      else conteo.set(clave, { nombre: s.ciudad, total: 1 })
     }
-    return mejor
+    return [...conteo.values()].sort((a, b) => a.nombre.localeCompare(b.nombre))
   }, [servicios])
 
-  // Agrupa las órdenes abiertas por técnico (solo técnicos con asignación).
+  // Conjunto de datos filtrado por ciudad (base para TODO el cálculo posterior).
+  const serviciosDeCiudad = useMemo(() => {
+    if (ciudad === TODAS) return servicios
+    const objetivo = limpiarTexto(ciudad)
+    return servicios.filter((s) => limpiarTexto(s.ciudad) === objetivo)
+  }, [servicios, ciudad])
+
+  // Agrupa por técnico, SOLO técnicos con órdenes en la ciudad seleccionada.
   const grupos = useMemo<PlanillaTecnico[]>(() => {
-    const conTecnico = servicios.filter((s) => s.tecnico_id !== null)
-    const tecnicosConOrdenes = tecnicos
+    const conTecnico = serviciosDeCiudad.filter((s) => s.tecnico_id !== null)
+    return tecnicos
       .filter((t) => conTecnico.some((s) => s.tecnico_id === t.id))
       .sort((a, b) => a.nombre.localeCompare(b.nombre))
-    return tecnicosConOrdenes
       .map((t) => ({
         tecnico: t,
         servicios: conTecnico.filter((s) => s.tecnico_id === t.id),
       }))
       .filter((g) => g.servicios.length > 0)
-  }, [servicios, tecnicos])
+  }, [serviciosDeCiudad, tecnicos])
 
   const totalOrdenes = grupos.reduce((acc, g) => acc + g.servicios.length, 0)
-  const totalCriticas = grupos.reduce((acc, g) => acc + g.servicios.filter((s) => esCritica(s.dias_antiguedad)).length, 0)
+  const totalCriticas = grupos.reduce(
+    (acc, g) => acc + g.servicios.filter((s) => esCritica(s.dias_antiguedad)).length,
+    0,
+  )
 
+  // El técnico seleccionado puede dejar de existir al cambiar de ciudad.
   const seleccionActual =
-    modo === 'especifico'
-      ? grupos.find((g) => g.tecnico.id === tecnicoId)
-      : undefined
+    modo === 'especifico' ? grupos.find((g) => g.tecnico.id === tecnicoId) : undefined
 
   const ordenesSeleccionadas = seleccionActual ? seleccionActual.servicios.length : totalOrdenes
   const criticasSeleccionadas = seleccionActual
@@ -77,9 +89,27 @@ export function PdfExportModal({
   // Órdenes que efectivamente se exportarán (aplicando el filtro de críticas).
   const ordenesAExportar = soloCriticas ? criticasSeleccionadas : ordenesSeleccionadas
 
+  function cambiarCiudad(valor: string) {
+    setCiudad(valor)
+    // Si el técnico elegido no tiene órdenes en la nueva ciudad, se limpia.
+    if (modo === 'especifico' && tecnicoId) {
+      const objetivo = valor === TODAS ? null : limpiarTexto(valor)
+      const sigueDisponible = servicios.some(
+        (s) =>
+          (objetivo === null || limpiarTexto(s.ciudad) === objetivo) &&
+          s.tecnico_id === tecnicoId,
+      )
+      if (!sigueDisponible) setTecnicoId('')
+    }
+  }
+
   async function generar() {
     if (modo === 'especifico' && !tecnicoId) {
       notificar('Selecciona un técnico para exportar.', 'error')
+      return
+    }
+    if (grupos.length === 0) {
+      notificar('No hay órdenes con técnico asignado en la ciudad seleccionada.', 'error')
       return
     }
     setGenerando(true)
@@ -89,7 +119,7 @@ export function PdfExportModal({
         modo === 'especifico' ? grupos.filter((g) => g.tecnico.id === tecnicoId) : grupos
       const doc = await generarPlanillaPdf(gruposAExportar, {
         soloCriticas,
-        ciudad: ciudad.trim() || ciudadPredeterminada,
+        ciudad: ciudad === TODAS ? 'Consolidado Regional' : ciudad,
       })
       doc.save(`planilla-despacho-${format(new Date(), 'yyyy-MM-dd-HHmm')}.pdf`)
       notificar('Planilla PDF generada correctamente.', 'success')
@@ -177,28 +207,28 @@ export function PdfExportModal({
           </label>
         )}
 
-        {/* Ciudad */}
+        {/* Ciudad (filtro funcional) */}
         <label className="block">
           <span className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-600">
-            <MapPin className="size-3.5" /> Ciudad (encabezado del PDF)
+            <MapPin className="size-3.5" /> Ciudad
           </span>
-          <input
-            list="ciudades-pdf"
+          <select
             value={ciudad}
-            onChange={(e) => setCiudad(e.target.value)}
-            placeholder={ciudadPredeterminada || 'Todas'}
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
-          />
-          <datalist id="ciudades-pdf">
-            {CIUDADES_SUGERIDAS.map((c) => (
-              <option key={c} value={c} />
+            onChange={(e) => cambiarCiudad(e.target.value)}
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+          >
+            <option value={TODAS}>Todas las ciudades (Consolidado Regional)</option>
+            {opcionesCiudad.map(({ nombre, total }) => (
+              <option key={nombre} value={nombre}>
+                {nombre} ({total})
+              </option>
             ))}
-          </datalist>
+          </select>
         </label>
 
         {/* Filtro críticas */}
         <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-300 bg-white px-3 py-2.5">
-          <span className="text-sm text-slate-700">Incluir solo órdenes críticas (+5 días)</span>
+          <span className="text-sm text-slate-700">Incluir solo órdenes críticas (3+ días)</span>
           <span className="relative inline-flex shrink-0 items-center">
             <input
               type="checkbox"
@@ -229,7 +259,7 @@ export function PdfExportModal({
               <p className="text-2xl font-bold text-red-600 tabular-nums">
                 {criticasSeleccionadas}
               </p>
-              <p className="text-[11px] text-slate-500">Críticas (+5d)</p>
+              <p className="text-[11px] text-slate-500">Críticas (3+ d)</p>
             </div>
           </div>
         </div>

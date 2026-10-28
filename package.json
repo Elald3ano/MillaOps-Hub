@@ -1,7 +1,9 @@
 {
-  "name": "techdispatch-hub",
+  "name": "millaops-hub",
   "private": true,
   "version": "0.0.0",
+  "description": "Plataforma de Despacho y Seguimiento de Servicios de Última Milla",
+  "author": "Daniel Córdoba <@elald3ano>",
   "type": "module",
   "scripts": {
     "dev": "vite",
