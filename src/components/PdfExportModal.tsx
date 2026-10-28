@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import { FileDown, Layers, MapPin, Users } from 'lucide-react'
-import { format } from 'date-fns'
 import { Modal } from './Modal'
 import { esCritica } from '../lib/sla'
 import type { PlanillaTecnico } from '../services/pdfGenerator'
@@ -114,14 +113,15 @@ export function PdfExportModal({
     }
     setGenerando(true)
     try {
-      const { generarPlanillaPdf } = await import('../services/pdfGenerator')
+      const { generarPlanillaPdf, nombrePlanillaPdf } = await import('../services/pdfGenerator')
       const gruposAExportar =
         modo === 'especifico' ? grupos.filter((g) => g.tecnico.id === tecnicoId) : grupos
+      const ciudadEtiqueta = ciudad === TODAS ? 'Consolidado Regional' : ciudad
       const doc = await generarPlanillaPdf(gruposAExportar, {
         soloCriticas,
-        ciudad: ciudad === TODAS ? 'Consolidado Regional' : ciudad,
+        ciudad: ciudadEtiqueta,
       })
-      doc.save(`planilla-despacho-${format(new Date(), 'yyyy-MM-dd-HHmm')}.pdf`)
+      doc.save(nombrePlanillaPdf(gruposAExportar, ciudadEtiqueta))
       notificar('Planilla PDF generada correctamente.', 'success')
       onCerrar()
     } catch (error) {

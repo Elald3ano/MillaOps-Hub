@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { format } from 'date-fns'
 import {
   ArrowDown,
   ArrowLeft,
@@ -479,7 +478,7 @@ export function ServiceTable({
     if (ordenados.length === 0) return
     setExportando(true)
     try {
-      const { exportarVistaActualPdf } = await import('../services/pdfGenerator')
+      const { exportarVistaActualPdf, nombreVistaTacticaPdf } = await import('../services/pdfGenerator')
       const ciudadActiva = filtros.ciudades.length === 0 ? 'Todas' : filtros.ciudades.join(', ')
       const barrioActivo = filtros.barrios.length === 0 ? 'Todos' : filtros.barrios.join(', ')
       const tecnicoActivo =
@@ -497,7 +496,7 @@ export function ServiceTable({
         columna: orden.columna,
         direccion: orden.direccion,
       })
-      doc.save(`vista-tactica-${format(new Date(), 'yyyy-MM-dd-HHmm')}.pdf`)
+      doc.save(nombreVistaTacticaPdf(ordenados, tecnicos))
       notificar('Vista exportada correctamente.', 'success')
     } catch (error) {
       notificar(error instanceof Error ? error.message : 'No se pudo exportar la vista.', 'error')

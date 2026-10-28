@@ -1,10 +1,29 @@
 import type { jsPDF } from 'jspdf'
 import type { Cell, CellHook, UserOptions } from 'jspdf-autotable'
+import { format } from 'date-fns'
 import { esCritica } from '../lib/sla'
 import type { Servicio, Tecnico } from '../types'
 
 /** Umbral único de "crítico": órdenes con 3 o más días (coherente con el SLA). */
 export const UMBRAL_CRITICO = 3
+
+/** Fotografía de fecha/hora usada en el nombre de archivo de los PDF (`2026-10-28-1023`). */
+export function marcaDeTiempo(fecha: Date = new Date()): string {
+  return format(fecha, 'yyyy-MM-dd-HHmm')
+}
+
+/**
+ * Convierte un texto en un slug seguro para nombres de archivo:
+ * minúsculas, sin tildes, sin símbolos y con guiones únicos.
+ */
+export function slugificar(texto: string): string {
+  return texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // quita tildes
+    .replace(/[^a-z0-9]+/g, '-') // reemplaza espacios y símbolos por guiones
+    .replace(/^-+|-+$/g, '') // quita guiones en los extremos
+}
 
 export interface PlanillaTecnico {
   tecnico: Tecnico
@@ -347,7 +366,33 @@ export async function generarPlanillaPdf(
   })
 
   agregarPiePagina(doc)
+
+  // Nomenclatura inteligente: el archivo lleva el nombre del técnico cuando la
+  // planilla es suya; si es consolidada, indica la ciudad o la escala regional.
+  const timestamp = marcaDeTiempo()
+  const nombreArchivo = nombrePlanillaPdf(gruposFiltrados, opciones.ciudad, timestamp)
+
+  doc.setProperties({ title: nombreArchivo.replace(/\.pdf$/, '') })
   return doc
+}
+
+/**
+ * Nombre de archivo de la planilla de despacho: `PD-<tecnico|consolidado>-<timestamp>.pdf`.
+ * Se calcula sobre los grupos que realmente se exportan (tras el filtro de críticas),
+ * por lo que un único técnico con órdenes siempre produce su nombre.
+ */
+export function nombrePlanillaPdf(
+  grupos: PlanillaTecnico[],
+  ciudad: string,
+  timestamp: string = marcaDeTiempo(),
+): string {
+  if (grupos.length === 1) {
+    return `PD-${slugificar(grupos[0].tecnico.nombre)}-${timestamp}.pdf`
+  }
+  if (ciudad === 'Consolidado Regional') {
+    return `PD-consolidado-regional-${timestamp}.pdf`
+  }
+  return `PD-consolidado-${slugificar(ciudad)}-${timestamp}.pdf`
 }
 
 /** Metadatos del resumen de la vista táctica exportada. */
@@ -358,6 +403,33 @@ export interface VistaActualMetadata {
   tecnico: string
   columna: string
   direccion: 'asc' | 'desc'
+}
+
+/**
+ * Nombre de archivo de la vista táctica. Si todas las órdenes visibles pertenecen a
+ * un mismo técnico, el archivo lleva su nombre; si están mezcladas o sin asignar,
+ * usa la etiqueta genérica `PD-vista-tactica-<timestamp>.pdf`.
+ */
+export function nombreVistaTacticaPdf(
+  servicios: Servicio[],
+  tecnicos: Tecnico[],
+  timestamp: string = marcaDeTiempo(),
+): string {
+  const idsUnicos = new Set(
+    servicios.map((s) => (s.tecnico_id ?? '').trim().toLowerCase()).filter((id) => id !== ''),
+  )
+  const tecnicoUnico =
+    idsUnicos.size === 1 && servicios.every((s) => (s.tecnico_id ?? '').trim() !== '')
+      ? [...idsUnicos][0]
+      : null
+
+  const tecnico = tecnicoUnico
+    ? tecnicos.find((t) => t.id.trim().toLowerCase() === tecnicoUnico)
+    : undefined
+
+  return tecnico
+    ? `PD-${slugificar(tecnico.nombre)}-${timestamp}.pdf`
+    : `PD-vista-tactica-${timestamp}.pdf`
 }
 
 const CABECERAS_VISTA = [
