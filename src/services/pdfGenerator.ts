@@ -1,11 +1,11 @@
 import type { jsPDF } from 'jspdf'
 import type { Cell, CellHook, UserOptions } from 'jspdf-autotable'
 import { format } from 'date-fns'
-import { esCritica } from '../lib/sla'
+import { conRetraso } from '../lib/sla'
 import type { Servicio, Tecnico } from '../types'
 
-/** Umbral único de "crítico": órdenes con 3 o más días (coherente con el SLA). */
-export const UMBRAL_CRITICO = 3
+/** Umbral de "retraso" en la planilla: órdenes con 2 o más días abiertas. */
+export const UMBRAL_RETRASO = 2
 
 /** Fotografía de fecha/hora usada en el nombre de archivo de los PDF (`2026-10-28-1023`). */
 export function marcaDeTiempo(fecha: Date = new Date()): string {
@@ -36,8 +36,8 @@ export interface OpcionesPdf {
 }
 
 /** Adaptador sobre el predicado compartido para trabajar con `Servicio`. */
-export function esServicioCritico(servicio: Servicio): boolean {
-  return esCritica(servicio.dias_antiguedad)
+export function esServicioConRetraso(servicio: Servicio): boolean {
+  return conRetraso(servicio.dias_antiguedad)
 }
 
 // ---- Constantes de diseño (A4 en milímetros) ----
@@ -114,7 +114,7 @@ function formatearFecha(fecha: Date): string {
 function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: OpcionesPdf): void {
   const ancho = doc.internal.pageSize.getWidth()
   const { tecnico, servicios } = grupo
-  const criticas = servicios.filter(esServicioCritico).length
+  const criticas = servicios.filter(esServicioConRetraso).length
   const fecha = formatearFecha(new Date())
 
   // Banda superior institucional
@@ -167,7 +167,7 @@ function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: Opcione
   doc.setTextColor(...COLOR_ROJO)
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(7.5)
-  doc.text(`CRÍTICAS (${UMBRAL_CRITICO}+ DÍAS)`, MARGEN + boxW + 11, Y_KPI + 6)
+  doc.text(`CON RETRASO (${UMBRAL_RETRASO}+ DÍAS)`, MARGEN + boxW + 11, Y_KPI + 6)
   doc.setFontSize(18)
   doc.text(String(criticas), MARGEN + boxW + 11, Y_KPI + 16)
 }
@@ -350,7 +350,7 @@ export async function generarPlanillaPdf(
       // REGLA DE ORO: dentro de cada técnico, lo más crítico primero
       // (antigüedad descendente) para que abra su hoja con lo prioritario.
       servicios: (
-        opciones.soloCriticas ? grupo.servicios.filter(esServicioCritico) : grupo.servicios
+        opciones.soloCriticas ? grupo.servicios.filter(esServicioConRetraso) : grupo.servicios
       ).sort((a, b) => b.dias_antiguedad - a.dias_antiguedad),
     }))
     .filter((grupo) => grupo.servicios.length > 0)

@@ -21,6 +21,14 @@ export function esCritica(dias: number): boolean {
   return dias >= 3
 }
 
+/**
+ * Órdenes "con retraso": 2 o más días (amarillas de 2 días + rojas de 3+).
+ * Alimenta el filtro opcional de la planilla PDF.
+ */
+export function conRetraso(dias: number): boolean {
+  return dias >= 2
+}
+
 export const SLA_LABELS: Record<SlaLevel, string> = {
   ok: '1 día',
   warn: '2 días',

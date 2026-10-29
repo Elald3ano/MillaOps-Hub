@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { FileDown, Layers, MapPin, Users } from 'lucide-react'
 import { Modal } from './Modal'
-import { esCritica } from '../lib/sla'
+import { conRetraso } from '../lib/sla'
 import type { PlanillaTecnico } from '../services/pdfGenerator'
 import { limpiarTexto } from '../lib/normalizer'
 import { cn } from '../lib/utils'
@@ -72,21 +72,20 @@ export function PdfExportModal({
   }, [serviciosDeCiudad, tecnicos])
 
   const totalOrdenes = grupos.reduce((acc, g) => acc + g.servicios.length, 0)
-  const totalCriticas = grupos.reduce(
-    (acc, g) => acc + g.servicios.filter((s) => esCritica(s.dias_antiguedad)).length,
-    0,
-  )
+  const totalConRetraso = serviciosDeCiudad.filter(
+    (s) => s.tecnico_id !== null && conRetraso(s.dias_antiguedad),
+  ).length
 
   // El técnico seleccionado puede dejar de existir al cambiar de ciudad.
   const seleccionActual =
     modo === 'especifico' ? grupos.find((g) => g.tecnico.id === tecnicoId) : undefined
 
   const ordenesSeleccionadas = seleccionActual ? seleccionActual.servicios.length : totalOrdenes
-  const criticasSeleccionadas = seleccionActual
-    ? seleccionActual.servicios.filter((s) => esCritica(s.dias_antiguedad)).length
-    : totalCriticas
-  // Órdenes que efectivamente se exportarán (aplicando el filtro de críticas).
-  const ordenesAExportar = soloCriticas ? criticasSeleccionadas : ordenesSeleccionadas
+  const conRetrasoSeleccionadas = seleccionActual
+    ? seleccionActual.servicios.filter((s) => conRetraso(s.dias_antiguedad)).length
+    : totalConRetraso
+  // Órdenes que efectivamente se exportarán (aplicando el filtro de retraso).
+  const ordenesAExportar = soloCriticas ? conRetrasoSeleccionadas : ordenesSeleccionadas
 
   function cambiarCiudad(valor: string) {
     setCiudad(valor)
@@ -226,9 +225,11 @@ export function PdfExportModal({
           </select>
         </label>
 
-        {/* Filtro críticas */}
+        {/* Filtro de retraso */}
         <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-slate-300 bg-white px-3 py-2.5">
-          <span className="text-sm text-slate-700">Incluir solo órdenes críticas (3+ días)</span>
+          <span className="text-sm text-slate-700">
+            Incluir solo órdenes con retraso (2+ días)
+          </span>
           <span className="relative inline-flex shrink-0 items-center">
             <input
               type="checkbox"
@@ -257,9 +258,9 @@ export function PdfExportModal({
             </div>
             <div>
               <p className="text-2xl font-bold text-red-600 tabular-nums">
-                {criticasSeleccionadas}
+                {conRetrasoSeleccionadas}
               </p>
-              <p className="text-[11px] text-slate-500">Críticas (3+ d)</p>
+              <p className="text-[11px] text-slate-500">Con retraso (2+ d)</p>
             </div>
           </div>
         </div>
