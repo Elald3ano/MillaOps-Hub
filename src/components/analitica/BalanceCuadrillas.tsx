@@ -188,10 +188,8 @@ export function BalanceCuadrillas({
     return { ranking, sinOrdenes }
   }, [servicios, tecnicos, ciudadesActivas, tecnicosPorId])
 
-  // La ciudad con más órdenes abre por defecto.
-  const [sucursalExpandida, setSucursalExpandida] = useState<string | null>(
-    () => resumenCiudades[0]?.clave ?? null,
-  )
+  // Todas las ciudades comienzan colapsadas por defecto.
+  const [sucursalExpandida, setSucursalExpandida] = useState<string | null>(null)
 
   function toggleSucursal(clave: string) {
     setSucursalExpandida((prev) => (prev === clave ? null : clave))
