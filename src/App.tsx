@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BarChart3, ClipboardList, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, SlidersHorizontal, WifiOff } from 'lucide-react'
+import { BarChart3, ClipboardList, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, SlidersHorizontal, TrendingUp, WifiOff } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { FileUpload } from './components/FileUpload'
@@ -8,6 +8,7 @@ import { ServiceTable } from './components/ServiceTable'
 import { DirectorioTecnicos } from './components/territorio/DirectorioTecnicos'
 import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
 import { AnaliticaDashboard } from './components/analitica/AnaliticaDashboard'
+import { AuditoriaCierresDashboard } from './components/cierres/AuditoriaCierresDashboard'
 import { ToastContainer, type Toast, type ToastVariant } from './components/ToastContainer'
 import { RulesManagerModal } from './components/RulesManagerModal'
 import { PdfExportModal } from './components/PdfExportModal'
@@ -23,10 +24,11 @@ import {
   reemplazarServiciosActivos,
 } from './services/supabaseService'
 import type { ReglaConTecnico, Servicio, Tecnico } from './types'
+import type { ResultadoCierres } from './services/reconciliationService'
 import { cn } from './lib/utils'
 
 type EstadoConexion = 'conectando' | 'conectado' | 'error'
-type VistaPrincipal = 'despacho' | 'territorio' | 'analitica'
+type VistaPrincipal = 'despacho' | 'territorio' | 'analitica' | 'cierres'
 
 const TODOS_CIUDAD = 'todos'
 
@@ -52,6 +54,11 @@ function App() {
   // Navegación principal + Gestión Territorial
   const [vistaActiva, setVistaActiva] = useState<VistaPrincipal>('despacho')
   const [tecnicoSeleccionadoId, setTecnicoSeleccionadoId] = useState<string | null>(null)
+
+  // Auditoría de Cierres: estado levantado para persistir entre pestañas.
+  const [resultadoCierres, setResultadoCierres] = useState<ResultadoCierres | null>(null)
+  const [corteAyerNombre, setCorteAyerNombre] = useState('')
+  const [corteHoyNombre, setCorteHoyNombre] = useState('')
   const [ciudadesActivas, setCiudadesActivas] = useState<Record<string, string[]>>({})
 
   const notificar = useCallback((mensaje: string, variant: ToastVariant = 'info') => {
@@ -413,6 +420,7 @@ function App() {
                   { id: 'despacho', label: 'Despacho en Vivo', icon: ClipboardList },
                   { id: 'territorio', label: 'Gestión Territorial', icon: MapIcon },
                   { id: 'analitica', label: 'Analítica Distrital', icon: BarChart3 },
+                  { id: 'cierres', label: 'Auditoría de Cierres', icon: TrendingUp },
                 ] as const
               ).map(({ id, label, icon: Icon }) => (
                 <button
@@ -458,6 +466,18 @@ function App() {
                 servicios={serviciosActivos}
                 tecnicos={tecnicos}
                 ciudadesActivas={ciudadesActivas}
+              />
+            ) : vistaActiva === 'cierres' ? (
+              <AuditoriaCierresDashboard
+                serviciosActivos={serviciosActivos}
+                reglas={reglas}
+                notificar={notificar}
+                resultado={resultadoCierres}
+                onResultado={setResultadoCierres}
+                corteAyerNombre={corteAyerNombre}
+                corteHoyNombre={corteHoyNombre}
+                onCorteAyerNombre={setCorteAyerNombre}
+                onCorteHoyNombre={setCorteHoyNombre}
               />
             ) : tecnicoSeleccionado ? (
               <DetalleTecnicoTerritorio
