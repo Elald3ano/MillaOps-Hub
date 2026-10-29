@@ -1,3 +1,5 @@
+import { limpiarTexto } from './normalizer'
+
 /**
  * Catálogo oficial completo de los 73 tipos de servicio de la compañía.
  *
@@ -86,3 +88,42 @@ export type TipoServicioOficial = (typeof TIPOS_SERVICIO_OFICIALES)[number]
 
 /** Cantidad total del catálogo oficial. */
 export const TOTAL_TIPOS_SERVICIO = TIPOS_SERVICIO_OFICIALES.length
+
+// ---- Clasificación de tipos de servicio para el módulo de analítica ----
+// Todo cruce se hace con `limpiarTexto` (Invariante #1).
+
+// Palabras clave (normalizadas) de trámites livianos resolubles por una moto.
+const CLAVES_LIVIANAS = [
+  'cambiodeclave', // Cambio de clave / REVISIÓN 1º NIVEL - CAMBIO DE CLAVE
+  'cambiodeplan', // Cambio de plan de velocidad
+  'cambiodevelocidad', // cambio de velocidad
+  'lentitud', // Lentitud al navegar
+  'intermitencia', // Intermitencia al navegar
+  'actualizaciondatos', // Actualización de datos personales
+  'alquilerderouter', // Alquiler de router
+  'routerdesconfigurado', // Router desconfigurado
+  'routermesh', // Router mesh (reactivado)
+  'cambiocpe', // Cambio CPE
+  'cambiodeonu', // Cambio de ONU
+] as const
+
+/** ¿El tipo de servicio es un trámite liviano (oportunidad para moto)? */
+export function esServicioLiviano(tipo: string): boolean {
+  const limpio = limpiarTexto(tipo)
+  return CLAVES_LIVIANAS.some((clave) => limpio.includes(clave))
+}
+
+/** ¿El tipo de servicio corresponde a una falla de "Sin Señal"? */
+export function esSinSenal(tipo: string): boolean {
+  return limpiarTexto(tipo).includes('sinsenal')
+}
+
+/** ¿El tipo de servicio es una "Garantía"? */
+export function esGarantia(tipo: string): boolean {
+  return limpiarTexto(tipo).includes('garantia')
+}
+
+/** ¿El tipo de servicio es una "PQR Técnica"? */
+export function esPqrTecnica(tipo: string): boolean {
+  return limpiarTexto(tipo).includes('pqr')
+}

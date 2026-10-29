@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ClipboardList, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, SlidersHorizontal, WifiOff } from 'lucide-react'
+import { BarChart3, ClipboardList, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, SlidersHorizontal, WifiOff } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { FileUpload } from './components/FileUpload'
@@ -7,6 +7,7 @@ import { MetricCards } from './components/MetricCards'
 import { ServiceTable } from './components/ServiceTable'
 import { DirectorioTecnicos } from './components/territorio/DirectorioTecnicos'
 import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
+import { AnaliticaDashboard } from './components/analitica/AnaliticaDashboard'
 import { ToastContainer, type Toast, type ToastVariant } from './components/ToastContainer'
 import { RulesManagerModal } from './components/RulesManagerModal'
 import { PdfExportModal } from './components/PdfExportModal'
@@ -25,7 +26,7 @@ import type { ReglaConTecnico, Servicio, Tecnico } from './types'
 import { cn } from './lib/utils'
 
 type EstadoConexion = 'conectando' | 'conectado' | 'error'
-type VistaPrincipal = 'despacho' | 'territorio'
+type VistaPrincipal = 'despacho' | 'territorio' | 'analitica'
 
 const TODOS_CIUDAD = 'todos'
 
@@ -411,6 +412,7 @@ function App() {
                 [
                   { id: 'despacho', label: 'Despacho en Vivo', icon: ClipboardList },
                   { id: 'territorio', label: 'Gestión Territorial', icon: MapIcon },
+                  { id: 'analitica', label: 'Analítica Distrital', icon: BarChart3 },
                 ] as const
               ).map(({ id, label, icon: Icon }) => (
                 <button
@@ -451,6 +453,12 @@ function App() {
                   </div>
                 </div>
               </>
+            ) : vistaActiva === 'analitica' ? (
+              <AnaliticaDashboard
+                servicios={serviciosActivos}
+                tecnicos={tecnicos}
+                ciudadesActivas={ciudadesActivas}
+              />
             ) : tecnicoSeleccionado ? (
               <DetalleTecnicoTerritorio
                 tecnico={tecnicoSeleccionado}
