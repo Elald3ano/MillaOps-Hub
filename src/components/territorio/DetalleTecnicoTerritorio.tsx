@@ -133,7 +133,11 @@ export function DetalleTecnicoTerritorio({
   const barriosPorCiudad = useMemo(() => {
     const mapa = new Map<string, Map<string, string>>()
     const agregar = (ciudad: string, barrio: string) => {
-      const ck = limpiarTexto(ciudad)
+      // Canonicaliza la ciudad (Invariante #2) para que alias como "Toro"
+      // o "La Union" se unifiquen con "Toro Valle"/"La Union Valle" y los
+      // barrios de reglas y órdenes converjan en una única pestaña.
+      const canonica = ciudadCanonica(ciudad)
+      const ck = limpiarTexto(canonica)
       const bk = limpiarTexto(barrio)
       if (!ck || !bk) return
       const inner = mapa.get(ck) ?? new Map<string, string>()

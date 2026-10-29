@@ -23,7 +23,7 @@ export const SUCURSALES_AUTORIZADAS = [
   'Candelaria',
   'Caloto',
   'Cali',
-  'La Union',
+  'La Union Valle',
   'La Paila',
   'Bugalagrande',
   'Buga',
@@ -40,10 +40,12 @@ const ALIASES: Record<string, string> = {
   [limpiarTexto('Presidente')]: limpiarTexto('Presidente Valle'),
   [limpiarTexto('Los Mangos - Cali')]: limpiarTexto('Cali'),
   [limpiarTexto('Los Mangos')]: limpiarTexto('Cali'),
-  // Variantes con tilde/acentos que pueden llegar del sistema origen.
-  [limpiarTexto('La Unión')]: limpiarTexto('La Union'),
-  [limpiarTexto('Unión')]: limpiarTexto('La Union'),
-  [limpiarTexto('Unión Valle')]: limpiarTexto('La Union'),
+  // La Union → canónico "La Union Valle". `limpiarTexto` normaliza tildes,
+  // por lo que "La Unión", "La Unión Valle" y "Unión Valle" caen en las
+  // mismas claves (no se duplican).
+  [limpiarTexto('La Union')]: limpiarTexto('La Union Valle'),
+  [limpiarTexto('Union')]: limpiarTexto('La Union Valle'),
+  [limpiarTexto('Union Valle')]: limpiarTexto('La Union Valle'),
   [limpiarTexto('La Paila Valle')]: limpiarTexto('La Paila'),
 }
 
