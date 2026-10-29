@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Home,
   List,
+  MapPin,
   User,
   X,
 } from 'lucide-react'
@@ -17,7 +18,7 @@ import { cn } from '../../lib/utils'
 
 const ITEMS_POR_PAGINA = 30
 
-type ColumnaOrden = 'dias' | 'orden' | 'barrio' | 'cliente' | 'servicio'
+type ColumnaOrden = 'dias' | 'orden' | 'ciudad' | 'barrio' | 'cliente' | 'servicio'
 type ModoVista = 'barrios' | 'lista'
 
 interface OrdenState {
@@ -115,6 +116,9 @@ export function RadiografiaTecnico({
           break
         case 'orden':
           cmp = a.numero_orden.localeCompare(b.numero_orden, undefined, { numeric: true })
+          break
+        case 'ciudad':
+          cmp = a.ciudad.localeCompare(b.ciudad)
           break
         case 'barrio':
           cmp = a.barrio.localeCompare(b.barrio)
@@ -357,11 +361,12 @@ export function RadiografiaTecnico({
         <div>
           <div className="overflow-hidden rounded-lg ring-1 ring-white/10">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] text-left text-xs">
+              <table className="w-full min-w-[720px] text-left text-xs">
                 <thead className="bg-white/5 text-[10px] tracking-wide text-slate-400 uppercase">
                   <tr>
                     <ThOrdenable label="Días" columna="dias" orden={orden} onOrdenar={ordenarPor} />
                     <ThOrdenable label="Orden #" columna="orden" orden={orden} onOrdenar={ordenarPor} />
+                    <ThOrdenable label="Ciudad" columna="ciudad" orden={orden} onOrdenar={ordenarPor} />
                     <ThOrdenable label="Barrio" columna="barrio" orden={orden} onOrdenar={ordenarPor} />
                     <th className="px-3 py-1.5 font-semibold">Dirección</th>
                     <ThOrdenable
@@ -386,6 +391,12 @@ export function RadiografiaTecnico({
                       </td>
                       <td className="px-3 py-1.5 font-mono text-[11px] font-bold whitespace-nowrap text-white">
                         {s.numero_orden}
+                      </td>
+                      <td className="px-3 py-1.5 whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1 text-slate-200">
+                          <MapPin className="size-3 shrink-0 text-cyan-400" />
+                          <span className="font-semibold">{s.ciudad}</span>
+                        </span>
                       </td>
                       <td className="px-3 py-1.5 text-slate-300">{s.barrio}</td>
                       <td className="px-3 py-1.5 text-slate-300">{s.direccion || '—'}</td>
