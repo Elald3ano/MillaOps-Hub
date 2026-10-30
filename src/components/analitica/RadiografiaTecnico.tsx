@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import {
-  AlertTriangle,
   ArrowDown,
   ArrowUp,
   ChevronDown,
@@ -16,11 +15,20 @@ import {
 } from 'lucide-react'
 import type { Servicio, Tecnico } from '../../types'
 import type { ToastVariant } from '../ToastContainer'
-import { clasificarSla, conRetraso, esCritica, SLA_BADGE_CLASSES } from '../../lib/sla'
+import { clasificarSla, esCritica, SLA_BADGE_CLASSES } from '../../lib/sla'
 import { limpiarTexto } from '../../lib/normalizer'
 import { cn } from '../../lib/utils'
 
 const ITEMS_POR_PAGINA = 30
+
+/** Opciones rápidas del selector de umbral; `null` = sin filtro de días. */
+const UMBRALES_RAPIDOS: { valor: number | null; etiqueta: string }[] = [
+  { valor: null, etiqueta: 'Todas las órdenes' },
+  { valor: 2, etiqueta: '≥ 2 días (Con retraso)' },
+  { valor: 3, etiqueta: '≥ 3 días (Críticas)' },
+  { valor: 5, etiqueta: '≥ 5 días (Muy críticas)' },
+  { valor: 7, etiqueta: '≥ 7 días (Severas)' },
+]
 
 type ColumnaOrden = 'dias' | 'orden' | 'ciudad' | 'barrio' | 'cliente' | 'servicio'
 type ModoVista = 'barrios' | 'lista'
@@ -62,7 +70,9 @@ export function RadiografiaTecnico({
   const [orden, setOrden] = useState<OrdenState>({ columna: 'dias', direccion: 'desc' })
   const [pagina, setPagina] = useState(1)
   const [generandoPdf, setGenerandoPdf] = useState(false)
-  const [soloRetraso, setSoloRetraso] = useState(false)
+  // `null` = todas las edades; número = filtrar órdenes con `dias_antiguedad >= umbralDias`.
+  const [umbralDias, setUmbralDias] = useState<number | null>(null)
+  const [umbralBorrador, setUmbralBorrador] = useState('')
 
   const total = servicios.length
 
@@ -78,15 +88,15 @@ export function RadiografiaTecnico({
     return [...porTipo.values()].sort((a, b) => b.cantidad - a.cantidad)
   }, [servicios])
 
-  // Órdenes que cumplen los filtros activos: retraso (2+ días) + chips de servicio.
+  // Órdenes que cumplen los filtros activos: umbral dinámico de días + chips de servicio.
   const serviciosFiltrados = useMemo(() => {
     const set = new Set(serviciosFiltro)
     return servicios.filter((s) => {
-      if (soloRetraso && !conRetraso(s.dias_antiguedad)) return false
+      if (umbralDias !== null && s.dias_antiguedad < umbralDias) return false
       if (set.size > 0 && !set.has(limpiarTexto(s.tipo_servicio))) return false
       return true
     })
-  }, [servicios, serviciosFiltro, soloRetraso])
+  }, [servicios, serviciosFiltro, umbralDias])
 
   // Barrios del técnico (acordeón) sobre las órdenes filtradas, por criticidad.
   const barrios = useMemo(() => {
@@ -170,7 +180,7 @@ export function RadiografiaTecnico({
     )
   }
 
-  // Exportación en 1 clic: respeta chips + filtro de retraso, con orden SLA desc.
+  // Exportación en 1 clic: respeta chips + umbral de días, con orden SLA desc.
   async function descargarPlanilla() {
     if (serviciosFiltrados.length === 0) {
       notificar('Este técnico no tiene órdenes para exportar.', 'error')
@@ -194,7 +204,7 @@ export function RadiografiaTecnico({
         columna: 'dias',
         direccion: 'desc',
       })
-      const sufijo = soloRetraso ? '-retraso' : ''
+      const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
       doc.save(`PD-${slugificar(tecnico.nombre)}${sufijo}-${marcaDeTiempo()}.pdf`)
       notificar(`Planilla de ${tecnico.nombre} descargada con éxito.`, 'success')
     } catch (error) {
@@ -221,13 +231,13 @@ export function RadiografiaTecnico({
               <span
                 className={cn(
                   'rounded-full px-2 py-0.5 text-xs font-semibold ring-1 tabular-nums',
-                  soloRetraso
+                  umbralDias !== null
                     ? 'bg-amber-500/15 text-amber-200 ring-amber-500/30'
                     : 'bg-white/10 text-slate-200 ring-white/15',
                 )}
               >
-                {soloRetraso
-                  ? `${serviciosFiltrados.length} con retraso de ${total} órdenes totales`
+                {umbralDias !== null
+                  ? `${serviciosFiltrados.length} órdenes (≥ ${umbralDias} días) de ${total} totales`
                   : `${total} órdenes`}
               </span>
             </h3>
@@ -235,21 +245,73 @@ export function RadiografiaTecnico({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setSoloRetraso((v) => !v)}
-            aria-pressed={soloRetraso}
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          {/* Umbral dinámico de días */}
+          <div
             className={cn(
-              'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
-              soloRetraso
+              'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 transition',
+              umbralDias !== null
                 ? 'border-amber-500 bg-amber-950/60 text-amber-200'
-                : 'border-white/10 bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white',
+                : 'border-white/10 bg-white/5 text-slate-300',
             )}
           >
-            <AlertTriangle className="size-3.5" />
-            Solo con retraso (2+ días)
-          </button>
+            <label htmlFor="umbral-dias-tecnico" className="sr-only">
+              Filtrar por días mínimos de antigüedad
+            </label>
+            <select
+              id="umbral-dias-tecnico"
+              value={umbralDias === null ? 'todas' : String(umbralDias)}
+              onChange={(e) => {
+                const valor = e.target.value
+                setUmbralDias(valor === 'todas' ? null : Number(valor))
+                setUmbralBorrador('')
+              }}
+              className="cursor-pointer rounded border-none bg-transparent text-[11px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+            >
+              <option value="todas" className="bg-slate-900 text-slate-200">
+                ⏱️ Todas las edades
+              </option>
+              {UMBRALES_RAPIDOS.map((o) => (
+                <option key={o.etiqueta} value={o.valor ?? 'todas'} className="bg-slate-900 text-slate-200">
+                  {o.etiqueta}
+                </option>
+              ))}
+            </select>
+
+            <input
+              type="number"
+              min={1}
+              max={365}
+              inputMode="numeric"
+              value={umbralBorrador}
+              onChange={(e) => setUmbralBorrador(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter') return
+                const n = Number(umbralBorrador)
+                if (!Number.isFinite(n) || n < 1) return
+                setUmbralDias(Math.floor(n))
+                setUmbralBorrador('')
+              }}
+              placeholder="≥ n"
+              aria-label="Umbral personalizado de días (Enter para aplicar)"
+              className="w-14 rounded border border-slate-700 bg-slate-950 py-0.5 text-center text-[11px] font-semibold text-amber-200 placeholder:text-slate-500 focus:border-amber-500 focus:outline-none"
+            />
+
+            {umbralDias !== null && (
+              <button
+                type="button"
+                onClick={() => {
+                  setUmbralDias(null)
+                  setUmbralBorrador('')
+                }}
+                aria-label="Quitar filtro de días"
+                className="inline-flex items-center rounded p-0.5 text-amber-200/80 transition hover:bg-amber-500/20 hover:text-amber-100"
+              >
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
+
           <button
             type="button"
             onClick={() => void descargarPlanilla()}
