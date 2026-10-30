@@ -1,7 +1,7 @@
 import type { jsPDF } from 'jspdf'
 import type { Cell, CellHook, UserOptions } from 'jspdf-autotable'
 import { format } from 'date-fns'
-import { conRetraso } from '../lib/sla'
+import { conRetraso, esCritica } from '../lib/sla'
 import type { Servicio, Tecnico } from '../types'
 
 /** Umbral de "retraso" en la planilla: órdenes con 2 o más días abiertas. */
@@ -462,12 +462,28 @@ const CABECERAS_VISTA = [
   'Barrio / Dirección',
   'Cliente / Tel / Ref',
   'Tipo de Servicio',
-  'Técnico Asignado',
 ]
+
+/** 6 columnas (sin "Técnico Asignado"): 194 mm útiles, filas más compactas. */
+const ANCHOS_VISTA: UserOptions['columnStyles'] = {
+  0: { cellWidth: 14, halign: 'center', fontStyle: 'bold' },
+  1: { cellWidth: 22, textColor: COLOR_TEXTO_OSCURO },
+  2: { cellWidth: 25, fontStyle: 'bold' },
+  3: { cellWidth: 56 },
+  4: { cellWidth: 50 },
+  5: { cellWidth: 33 },
+}
+
+const ESTILOS_CUERPO_VISTA: UserOptions['styles'] = {
+  ...ESTILOS_CUERPO,
+  cellPadding: 2.2,
+}
+
+const Y_TABLA_VISTA = 72
 
 /**
  * Exporta la vista actual de la tabla (órdenes ya filtradas y ordenadas).
- * Genera un PDF limpio con las 7 columnas y una banda de resumen de la vista.
+ * Genera un PDF con cabecera ejecutiva (técnico(es) + KPIs) y 6 columnas limpias.
  */
 export async function exportarVistaActualPdf(
   servicios: Servicio[],
@@ -481,9 +497,30 @@ export async function exportarVistaActualPdf(
 
   const doc = new jsPDF({ unit: 'mm', format: 'a4' })
   const ancho = doc.internal.pageSize.getWidth()
-
-  const nombrePorId = new Map(tecnicos.map((t) => [t.id, t.nombre] as const))
+  const anchoUtil = ancho - 2 * MARGEN
   const hooksCliente = crearHooksCliente()
+
+  // Nombres únicos presentes en las filas exportadas (fallback: metadato).
+  const nombrePorId = new Map(tecnicos.map((t) => [t.id, t.nombre] as const))
+  const nombresFilas = [
+    ...new Set(
+      servicios.flatMap((s) => {
+        if (!s.tecnico_id) return []
+        const nombre = nombrePorId.get(s.tecnico_id)
+        return nombre ? [nombre] : []
+      }),
+    ),
+  ].sort((a, b) => a.localeCompare(b))
+  const nombresUnicos =
+    nombresFilas.length > 0
+      ? nombresFilas
+      : metadata.tecnico
+        ? [metadata.tecnico]
+        : []
+  const sinAsignar = servicios.some((s) => !s.tecnico_id)
+
+  const totalOrdenes = servicios.length
+  const criticas = servicios.filter((s) => esCritica(s.dias_antiguedad)).length
 
   // Banda institucional.
   doc.setFillColor(...COLOR_NAVY)
@@ -497,24 +534,61 @@ export async function exportarVistaActualPdf(
   doc.setTextColor(148, 163, 184)
   doc.text('MillaOps Hub', ancho - MARGEN, 13, { align: 'right' })
 
-  doc.setFont('helvetica', 'normal')
-  doc.setFontSize(8)
-  const resumen = `Vista de Despacho: ${metadata.conteo} órdenes | Filtros: Ciudad (${metadata.ciudad}) - Barrio (${metadata.barrio}) - Técnico (${metadata.tecnico}) | Ordenado por: ${metadata.columna} (${metadata.direccion})`
-  doc.text(doc.splitTextToSize(resumen, ancho - 2 * MARGEN), MARGEN, 21)
-  const yGenerado = 28
-  doc.text(`Generado: ${formatearFecha(new Date())}`, MARGEN, yGenerado)
+  // Nombre del técnico destacado (o consolidado).
+  doc.setTextColor(255, 255, 255)
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(14)
+  const etiquetaTecnico =
+    nombresUnicos.length === 1
+      ? `Técnico: ${nombresUnicos[0]}`
+      : nombresUnicos.length > 1
+        ? `Técnicos: Consolidado (${nombresUnicos.length})`
+        : 'Técnicos: Sin asignar'
+  doc.text(etiquetaTecnico, MARGEN, 23)
 
-  // Encabezado táctico: filtros activos + columna/dirección de ordenamiento.
+  // Subtitle: fecha/hora + filtros aplicados.
   const nota =
     metadata.notaFiltros ??
     `Filtros: ${metadata.ciudad} / ${metadata.barrio} | Ordenado por: ${metadata.columna} (${metadata.direccion})`
-  doc.setFont('helvetica', 'italic')
+  doc.setFont('helvetica', 'normal')
   doc.setFontSize(7.5)
-  doc.setTextColor(...COLOR_SLATE)
-  doc.text(nota, MARGEN, yGenerado + 5)
+  doc.setTextColor(203, 213, 225)
+  const subtitulo = `Generado: ${formatearFecha(new Date())} | ${nota}`
+  doc.text(doc.splitTextToSize(subtitulo, anchoUtil), MARGEN, 29)
+
+  // KPI cards (misma estética que la planilla masiva).
+  const boxW = (anchoUtil - 6) / 2
+
+  doc.setFillColor(241, 245, 249)
+  doc.setDrawColor(203, 213, 225)
+  doc.roundedRect(MARGEN, Y_KPI, boxW, ALTO_KPI, 2, 2, 'FD')
+  doc.setTextColor(...COLOR_NAVY)
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(7.5)
+  doc.text('TOTAL ÓRDENES', MARGEN + 5, Y_KPI + 6)
+  doc.setFontSize(16)
+  doc.text(String(totalOrdenes), MARGEN + 5, Y_KPI + 16)
+
+  doc.setFillColor(254, 242, 242)
+  doc.setDrawColor(254, 202, 202)
+  doc.roundedRect(MARGEN + boxW + 6, Y_KPI, boxW, ALTO_KPI, 2, 2, 'FD')
+  doc.setTextColor(...COLOR_ROJO)
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(7.5)
+  doc.text('CRÍTICAS (3+ DÍAS)', MARGEN + boxW + 11, Y_KPI + 6)
+  doc.setFontSize(16)
+  doc.text(String(criticas), MARGEN + boxW + 11, Y_KPI + 16)
+
+  // Nota de órdenes sin técnico asignado (si aplica).
+  if (sinAsignar && nombresUnicos.length > 0) {
+    doc.setFont('helvetica', 'italic')
+    doc.setFontSize(7)
+    doc.setTextColor(...COLOR_SLATE)
+    doc.text('Incluye órdenes sin técnico asignado.', MARGEN, Y_KPI + ALTO_KPI + 4)
+  }
 
   autoTable(doc, {
-    startY: Y_TABLA,
+    startY: Y_TABLA_VISTA,
     head: [CABECERAS_VISTA],
     body: servicios.map((s) => [
       String(s.dias_antiguedad),
@@ -527,14 +601,13 @@ export async function exportarVistaActualPdf(
         `Ref: ${s.referencia_pago || 'S/R'}`,
       ].join('\n'),
       s.tipo_servicio,
-      s.tecnico_id ? (nombrePorId.get(s.tecnico_id) ?? '—') : 'Sin Asignar',
     ]),
     margin: { left: MARGEN_TABLA, right: MARGEN_TABLA, bottom: 26 },
     rowPageBreak: 'avoid',
-    styles: ESTILOS_CUERPO,
+    styles: ESTILOS_CUERPO_VISTA,
     headStyles: ESTILOS_HEAD,
     alternateRowStyles: { fillColor: COLOR_ROW_ALT },
-    columnStyles: ANCHOS_COLUMNAS,
+    columnStyles: ANCHOS_VISTA,
     willDrawCell: hooksCliente.willDrawCell,
     didDrawCell: hooksCliente.didDrawCell,
     didParseCell: colorearDiasSemaforo,
