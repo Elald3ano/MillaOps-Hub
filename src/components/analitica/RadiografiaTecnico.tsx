@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   ChevronDown,
@@ -15,7 +16,7 @@ import {
 } from 'lucide-react'
 import type { Servicio, Tecnico } from '../../types'
 import type { ToastVariant } from '../ToastContainer'
-import { clasificarSla, esCritica, SLA_BADGE_CLASSES } from '../../lib/sla'
+import { clasificarSla, conRetraso, esCritica, SLA_BADGE_CLASSES } from '../../lib/sla'
 import { limpiarTexto } from '../../lib/normalizer'
 import { cn } from '../../lib/utils'
 
@@ -61,6 +62,7 @@ export function RadiografiaTecnico({
   const [orden, setOrden] = useState<OrdenState>({ columna: 'dias', direccion: 'desc' })
   const [pagina, setPagina] = useState(1)
   const [generandoPdf, setGenerandoPdf] = useState(false)
+  const [soloRetraso, setSoloRetraso] = useState(false)
 
   const total = servicios.length
 
@@ -76,12 +78,15 @@ export function RadiografiaTecnico({
     return [...porTipo.values()].sort((a, b) => b.cantidad - a.cantidad)
   }, [servicios])
 
-  // Órdenes que cumplen el filtro de chips de servicio.
+  // Órdenes que cumplen los filtros activos: retraso (2+ días) + chips de servicio.
   const serviciosFiltrados = useMemo(() => {
-    if (serviciosFiltro.length === 0) return servicios
     const set = new Set(serviciosFiltro)
-    return servicios.filter((s) => set.has(limpiarTexto(s.tipo_servicio)))
-  }, [servicios, serviciosFiltro])
+    return servicios.filter((s) => {
+      if (soloRetraso && !conRetraso(s.dias_antiguedad)) return false
+      if (set.size > 0 && !set.has(limpiarTexto(s.tipo_servicio))) return false
+      return true
+    })
+  }, [servicios, serviciosFiltro, soloRetraso])
 
   // Barrios del técnico (acordeón) sobre las órdenes filtradas, por criticidad.
   const barrios = useMemo(() => {
@@ -165,27 +170,32 @@ export function RadiografiaTecnico({
     )
   }
 
-  // Exportación en 1 clic: respeta los chips de servicio activos y el orden actual.
+  // Exportación en 1 clic: respeta chips + filtro de retraso, con orden SLA desc.
   async function descargarPlanilla() {
-    if (ordenados.length === 0) {
+    if (serviciosFiltrados.length === 0) {
       notificar('Este técnico no tiene órdenes para exportar.', 'error')
       return
     }
     setGenerandoPdf(true)
     try {
-      const { exportarVistaActualPdf, nombreVistaTacticaPdf } = await import(
+      const { exportarVistaActualPdf, slugificar, marcaDeTiempo } = await import(
         '../../services/pdfGenerator'
       )
-      const ciudadesUnicas = [...new Set(ordenados.map((s) => s.ciudad))].sort()
-      const doc = await exportarVistaActualPdf(ordenados, [tecnico], {
-        conteo: ordenados.length,
+      // Regla de oro: lo más crítico primero (antigüedad descendente).
+      const ordenadasSla = [...serviciosFiltrados].sort(
+        (a, b) => b.dias_antiguedad - a.dias_antiguedad,
+      )
+      const ciudadesUnicas = [...new Set(ordenadasSla.map((s) => s.ciudad))].sort()
+      const doc = await exportarVistaActualPdf(ordenadasSla, [tecnico], {
+        conteo: ordenadasSla.length,
         ciudad: ciudadesUnicas.join(', ') || 'Todas',
         barrio: 'Todas',
         tecnico: tecnico.nombre,
-        columna: orden.columna,
-        direccion: orden.direccion,
+        columna: 'dias',
+        direccion: 'desc',
       })
-      doc.save(nombreVistaTacticaPdf(ordenados, [tecnico]))
+      const sufijo = soloRetraso ? '-retraso' : ''
+      doc.save(`PD-${slugificar(tecnico.nombre)}${sufijo}-${marcaDeTiempo()}.pdf`)
       notificar(`Planilla de ${tecnico.nombre} descargada con éxito.`, 'success')
     } catch (error) {
       notificar(
@@ -200,7 +210,7 @@ export function RadiografiaTecnico({
   return (
     <section className="relative overflow-hidden rounded-2xl bg-slate-900 p-5 text-slate-100 shadow-lg ring-1 ring-cyan-400/25">
       {/* Cabecera */}
-      <header className="mb-4 flex items-start justify-between gap-3">
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-cyan-500/15 ring-1 ring-cyan-400/30">
             <User className="size-5 text-cyan-300" />
@@ -208,8 +218,17 @@ export function RadiografiaTecnico({
           <div className="min-w-0">
             <h3 className="flex flex-wrap items-center gap-2 text-base font-bold text-white">
               <span className="truncate">{tecnico.nombre}</span>
-              <span className="rounded-full bg-white/10 px-2 py-0.5 text-xs font-semibold text-slate-200 ring-1 ring-white/15 tabular-nums">
-                {total} órdenes
+              <span
+                className={cn(
+                  'rounded-full px-2 py-0.5 text-xs font-semibold ring-1 tabular-nums',
+                  soloRetraso
+                    ? 'bg-amber-500/15 text-amber-200 ring-amber-500/30'
+                    : 'bg-white/10 text-slate-200 ring-white/15',
+                )}
+              >
+                {soloRetraso
+                  ? `${serviciosFiltrados.length} con retraso de ${total} órdenes totales`
+                  : `${total} órdenes`}
               </span>
             </h3>
             <p className="text-xs text-slate-400">Radiografía por zona del técnico</p>
@@ -219,8 +238,22 @@ export function RadiografiaTecnico({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
+            onClick={() => setSoloRetraso((v) => !v)}
+            aria-pressed={soloRetraso}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
+              soloRetraso
+                ? 'border-amber-500 bg-amber-950/60 text-amber-200'
+                : 'border-white/10 bg-white/5 text-slate-300 hover:bg-white/10 hover:text-white',
+            )}
+          >
+            <AlertTriangle className="size-3.5" />
+            Solo con retraso (2+ días)
+          </button>
+          <button
+            type="button"
             onClick={() => void descargarPlanilla()}
-            disabled={generandoPdf || ordenados.length === 0}
+            disabled={generandoPdf || serviciosFiltrados.length === 0}
             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30 transition hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {generandoPdf ? (
