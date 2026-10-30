@@ -33,6 +33,14 @@ export interface PlanillaTecnico {
 export interface OpcionesPdf {
   soloCriticas: boolean
   ciudad: string
+  /**
+   * Si es `true`, el PDF conserva el orden exacto en que llegaron las órdenes
+   * (filtradas y ordenadas por la pantalla). Si es `false`/`undefined`, se
+   * reordena por SLA descendente (regla de oro del modal masivo matutino).
+   */
+  respetarOrden?: boolean
+  /** Línea de contexto opcional ("Filtros: ≥ 7 días | Ordenado por: barrio (asc)"). */
+  notaFiltros?: string
 }
 
 /** Adaptador sobre el predicado compartido para trabajar con `Servicio`. */
@@ -146,6 +154,14 @@ function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: Opcione
     { align: 'right' },
   )
   doc.text(`Generado: ${fecha}`, ancho - MARGEN, 27, { align: 'right' })
+
+  // Línea táctica de filtros/orden (solo cuando la vista los declara).
+  if (opciones.notaFiltros) {
+    doc.setFont('helvetica', 'italic')
+    doc.setFontSize(7.5)
+    doc.setTextColor(203, 213, 225)
+    doc.text(opciones.notaFiltros, ancho - MARGEN, 31.5, { align: 'right' })
+  }
 
   // KPIs en cabecera (números grandes con borde definido).
   const anchoUtil = ancho - 2 * MARGEN
@@ -345,14 +361,19 @@ export async function generarPlanillaPdf(
   const doc = new jsPDF({ unit: 'mm', format: 'a4' })
 
   const gruposFiltrados = grupos
-    .map((grupo) => ({
-      tecnico: grupo.tecnico,
-      // REGLA DE ORO: dentro de cada técnico, lo más crítico primero
-      // (antigüedad descendente) para que abra su hoja con lo prioritario.
-      servicios: (
-        opciones.soloCriticas ? grupo.servicios.filter(esServicioConRetraso) : grupo.servicios
-      ).sort((a, b) => b.dias_antiguedad - a.dias_antiguedad),
-    }))
+    .map((grupo) => {
+      // REGLA DE ORO (modal masivo): lo más crítico primero. La vista táctica
+      // envía `respetarOrden: true` para conservar el orden de pantalla.
+      const ordenesFinales = (
+        opciones.soloCriticas
+          ? grupo.servicios.filter(esServicioConRetraso)
+          : grupo.servicios
+      ).slice()
+      if (!opciones.respetarOrden) {
+        ordenesFinales.sort((a, b) => b.dias_antiguedad - a.dias_antiguedad)
+      }
+      return { tecnico: grupo.tecnico, servicios: ordenesFinales }
+    })
     .filter((grupo) => grupo.servicios.length > 0)
 
   if (gruposFiltrados.length === 0) {
@@ -403,6 +424,8 @@ export interface VistaActualMetadata {
   tecnico: string
   columna: string
   direccion: 'asc' | 'desc'
+  /** Línea táctica opcional con los filtros activos y el orden de la tabla. */
+  notaFiltros?: string
 }
 
 /**
@@ -478,7 +501,17 @@ export async function exportarVistaActualPdf(
   doc.setFontSize(8)
   const resumen = `Vista de Despacho: ${metadata.conteo} órdenes | Filtros: Ciudad (${metadata.ciudad}) - Barrio (${metadata.barrio}) - Técnico (${metadata.tecnico}) | Ordenado por: ${metadata.columna} (${metadata.direccion})`
   doc.text(doc.splitTextToSize(resumen, ancho - 2 * MARGEN), MARGEN, 21)
-  doc.text(`Generado: ${formatearFecha(new Date())}`, MARGEN, 28)
+  const yGenerado = 28
+  doc.text(`Generado: ${formatearFecha(new Date())}`, MARGEN, yGenerado)
+
+  // Encabezado táctico: filtros activos + columna/dirección de ordenamiento.
+  const nota =
+    metadata.notaFiltros ??
+    `Filtros: ${metadata.ciudad} / ${metadata.barrio} | Ordenado por: ${metadata.columna} (${metadata.direccion})`
+  doc.setFont('helvetica', 'italic')
+  doc.setFontSize(7.5)
+  doc.setTextColor(...COLOR_SLATE)
+  doc.text(nota, MARGEN, yGenerado + 5)
 
   autoTable(doc, {
     startY: Y_TABLA,

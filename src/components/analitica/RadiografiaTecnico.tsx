@@ -180,9 +180,10 @@ export function RadiografiaTecnico({
     )
   }
 
-  // Exportación en 1 clic: respeta chips + umbral de días, con orden SLA desc.
+  // Exportación en 1 clic: respeta chips + umbral de días + orden de columnas.
   async function descargarPlanilla() {
-    if (serviciosFiltrados.length === 0) {
+    const ordenesOrdenadas = serviciosFiltrados
+    if (ordenesOrdenadas.length === 0) {
       notificar('Este técnico no tiene órdenes para exportar.', 'error')
       return
     }
@@ -191,18 +192,23 @@ export function RadiografiaTecnico({
       const { exportarVistaActualPdf, slugificar, marcaDeTiempo } = await import(
         '../../services/pdfGenerator'
       )
-      // Regla de oro: lo más crítico primero (antigüedad descendente).
-      const ordenadasSla = [...serviciosFiltrados].sort(
-        (a, b) => b.dias_antiguedad - a.dias_antiguedad,
-      )
-      const ciudadesUnicas = [...new Set(ordenadasSla.map((s) => s.ciudad))].sort()
-      const doc = await exportarVistaActualPdf(ordenadasSla, [tecnico], {
-        conteo: ordenadasSla.length,
+      const ciudadesUnicas = [...new Set(ordenesOrdenadas.map((s) => s.ciudad))].sort()
+      // Nota táctica: filtros activos + ordenamiento de la tabla.
+      const filtros: string[] = []
+      if (umbralDias !== null) filtros.push(`≥ ${umbralDias} días`)
+      if (serviciosFiltro.length > 0) filtros.push(`${serviciosFiltro.length} servicio(s)`)
+      const notaFiltros = `Filtros: ${
+        filtros.length > 0 ? filtros.join(' + ') : 'Todas'
+      } | Ordenado por: ${orden.columna} (${orden.direccion})`
+
+      const doc = await exportarVistaActualPdf(ordenesOrdenadas, [tecnico], {
+        conteo: ordenesOrdenadas.length,
         ciudad: ciudadesUnicas.join(', ') || 'Todas',
         barrio: 'Todas',
         tecnico: tecnico.nombre,
-        columna: 'dias',
-        direccion: 'desc',
+        columna: orden.columna,
+        direccion: orden.direccion,
+        notaFiltros,
       })
       const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
       doc.save(`PD-${slugificar(tecnico.nombre)}${sufijo}-${marcaDeTiempo()}.pdf`)
