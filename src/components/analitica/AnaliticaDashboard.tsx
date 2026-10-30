@@ -1,8 +1,11 @@
 import { useMemo, useState } from 'react'
-import { BarChart3, MapPin } from 'lucide-react'
+import { BarChart3, MapPin, Upload } from 'lucide-react'
 import type { Servicio, Tecnico } from '../../types'
+import type { ToastVariant } from '../ToastContainer'
 import { ciudadCanonica, esSucursalAutorizada } from '../../lib/zonasPermitidas'
 import { MultiSelectFilter, type MultiSelectOpcion } from '../MultiSelectFilter'
+import { Modal } from '../Modal'
+import { FileUpload } from '../FileUpload'
 import { BalanceCuadrillas } from './BalanceCuadrillas'
 import { RadarMasivos } from './RadarMasivos'
 import { RadarFlotantes } from './RadarFlotantes'
@@ -13,6 +16,9 @@ interface AnaliticaDashboardProps {
   servicios: Servicio[]
   tecnicos: Tecnico[]
   ciudadesActivas: Record<string, string[]>
+  procesando: boolean
+  onProcesarReporte: (file: File, ciudadFiltro: string | undefined) => Promise<boolean>
+  notificar: (mensaje: string, variant?: ToastVariant) => void
 }
 
 /**
@@ -23,10 +29,14 @@ export function AnaliticaDashboard({
   servicios,
   tecnicos,
   ciudadesActivas,
+  procesando,
+  onProcesarReporte,
+  notificar,
 }: AnaliticaDashboardProps) {
   const [sucursalesSeleccionadas, setSucursalesSeleccionadas] = useState<string[]>([])
   const [tecnicoSeleccionadoId, setTecnicoSeleccionadoId] = useState<string | null>(null)
   const [barrioExpandido, setBarrioExpandido] = useState<string | null>(null)
+  const [modalCargaAbierto, setModalCargaAbierto] = useState(false)
 
   // Invariante #2: todo responde al universo de las 27 sucursales autorizadas.
   const serviciosAutorizados = useMemo(
@@ -108,6 +118,15 @@ export function AnaliticaDashboard({
             />
           </div>
 
+          {/* Carga rápida del reporte diario */}
+          <button
+            type="button"
+            onClick={() => setModalCargaAbierto(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/10 hover:text-white"
+          >
+            <Upload className="size-3.5" /> Cargar Reporte Sigma
+          </button>
+
           {/* Badge resumen */}
           <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30">
             Total {serviciosFiltrados.length} órdenes analizadas
@@ -115,28 +134,33 @@ export function AnaliticaDashboard({
         </div>
       </div>
 
-      {/* Drill-down: técnicos (izquierda) → radiografía / radar global (derecha) */}
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-        <BalanceCuadrillas
-          servicios={serviciosFiltrados}
-          tecnicos={tecnicos}
-          ciudadesActivas={ciudadesActivas}
-          tecnicoSeleccionadoId={tecnicoSeleccionadoId}
-          onToggleTecnico={toggleTecnico}
-        />
-
-        {tecnicoSeleccionado ? (
-          <RadiografiaTecnico
-            key={tecnicoSeleccionado.id}
-            tecnico={tecnicoSeleccionado}
-            servicios={serviciosDelTecnico}
-            barrioExpandido={barrioExpandido}
-            onToggleBarrio={toggleBarrio}
-            onVerVistaGlobal={verVistaGlobal}
+      {/* Drill-down: técnicos (izquierda, 4/12) → radiografía / radar global (derecha, 8/12) */}
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
+        <div className="lg:col-span-4">
+          <BalanceCuadrillas
+            servicios={serviciosFiltrados}
+            tecnicos={tecnicos}
+            ciudadesActivas={ciudadesActivas}
+            tecnicoSeleccionadoId={tecnicoSeleccionadoId}
+            onToggleTecnico={toggleTecnico}
           />
-        ) : (
-          <RadarMasivos servicios={serviciosFiltrados} />
-        )}
+        </div>
+
+        <div className="lg:col-span-8">
+          {tecnicoSeleccionado ? (
+            <RadiografiaTecnico
+              key={tecnicoSeleccionado.id}
+              tecnico={tecnicoSeleccionado}
+              servicios={serviciosDelTecnico}
+              barrioExpandido={barrioExpandido}
+              onToggleBarrio={toggleBarrio}
+              onVerVistaGlobal={verVistaGlobal}
+              notificar={notificar}
+            />
+          ) : (
+            <RadarMasivos servicios={serviciosFiltrados} />
+          )}
+        </div>
       </div>
 
       {/* Cards complementarias */}
@@ -144,6 +168,21 @@ export function AnaliticaDashboard({
         <RadarFlotantes servicios={serviciosFiltrados} />
         <ControlCalidad servicios={serviciosFiltrados} />
       </div>
+
+      {/* Modal de carga rápida del reporte diario */}
+      <Modal
+        abierto={modalCargaAbierto}
+        onCerrar={() => setModalCargaAbierto(false)}
+        titulo="Cargar Reporte Sigma"
+        descripcion="Procesa el nuevo Excel diario y actualiza el despacho en vivo."
+        anchoMaximo="max-w-lg"
+      >
+        <FileUpload
+          procesando={procesando}
+          onProcesar={onProcesarReporte}
+          onExito={() => setModalCargaAbierto(false)}
+        />
+      </Modal>
     </section>
   )
 }

@@ -248,7 +248,7 @@ function App() {
   }, [refrescarServicios, notificar])
 
   const handleProcesar = useCallback(
-    async (file: File, ciudadFiltro: string | undefined) => {
+    async (file: File, ciudadFiltro: string | undefined): Promise<boolean> => {
       setProcesando(true)
       const nombre = `${file.name.replace(/\.(xlsx|xls)$/i, '')} — ${format(new Date(), 'dd MMM yyyy HH:mm', { locale: es })}`
 
@@ -263,7 +263,7 @@ function App() {
               : 'El archivo no contiene servicios válidos.',
             'error',
           )
-          return
+          return false
         }
 
         // 2. Reglas territoriales activas (si el estado local está vacío, se consulta).
@@ -287,11 +287,13 @@ function App() {
           `Despacho listo: ${asignados.length} órdenes (${asignadosCount} asignadas).`,
           'success',
         )
+        return true
       } catch (error) {
         notificar(
           error instanceof Error ? error.message : 'No se pudo procesar el archivo.',
           'error',
         )
+        return false
       } finally {
         setProcesando(false)
       }
@@ -494,6 +496,9 @@ function App() {
                 servicios={serviciosActivos}
                 tecnicos={tecnicos}
                 ciudadesActivas={ciudadesActivas}
+                procesando={procesando}
+                onProcesarReporte={handleProcesar}
+                notificar={notificar}
               />
             ) : vistaActiva === 'cierres' ? (
               <AuditoriaCierresDashboard

@@ -5,7 +5,9 @@ import { CIUDADES_SUGERIDAS } from '../lib/sla'
 
 interface FileUploadProps {
   procesando: boolean
-  onProcesar: (file: File, ciudadFiltro: string | undefined) => Promise<void>
+  onProcesar: (file: File, ciudadFiltro: string | undefined) => Promise<boolean>
+  /** Se invoca cuando el procesamiento termina con éxito (para cerrar modales). */
+  onExito?: () => void
 }
 
 const EXTENSIONES_VALIDAS = ['.xlsx', '.xls']
@@ -22,7 +24,7 @@ function formatearTamano(bytes: number): string {
 }
 
 /** Dropzone accesible con filtro de ciudad y opción de Línea Base. */
-export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
+export function FileUpload({ procesando, onProcesar, onExito }: FileUploadProps) {
   const [archivo, setArchivo] = useState<File | null>(null)
   const [ciudad, setCiudad] = useState<string>('')
   const [dragging, setDragging] = useState(false)
@@ -55,8 +57,9 @@ export function FileUpload({ procesando, onProcesar }: FileUploadProps) {
   async function handleProcesar() {
     if (!archivo || procesando) return
     setErrorLocal(null)
-    await onProcesar(archivo, ciudad || undefined)
+    const exito = await onProcesar(archivo, ciudad || undefined)
     setArchivo(null)
+    if (exito) onExito?.()
   }
 
   return (

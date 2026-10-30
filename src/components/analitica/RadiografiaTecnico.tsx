@@ -5,13 +5,16 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  FileDown,
   Home,
   List,
+  Loader2,
   MapPin,
   User,
   X,
 } from 'lucide-react'
 import type { Servicio, Tecnico } from '../../types'
+import type { ToastVariant } from '../ToastContainer'
 import { clasificarSla, esCritica, SLA_BADGE_CLASSES } from '../../lib/sla'
 import { limpiarTexto } from '../../lib/normalizer'
 import { cn } from '../../lib/utils'
@@ -32,6 +35,7 @@ interface RadiografiaTecnicoProps {
   barrioExpandido: string | null
   onToggleBarrio: (clave: string) => void
   onVerVistaGlobal: () => void
+  notificar: (mensaje: string, variant?: ToastVariant) => void
 }
 
 interface ResumenBarrio {
@@ -50,11 +54,13 @@ export function RadiografiaTecnico({
   barrioExpandido,
   onToggleBarrio,
   onVerVistaGlobal,
+  notificar,
 }: RadiografiaTecnicoProps) {
   const [serviciosFiltro, setServiciosFiltro] = useState<string[]>([])
   const [modoVista, setModoVista] = useState<ModoVista>('barrios')
   const [orden, setOrden] = useState<OrdenState>({ columna: 'dias', direccion: 'desc' })
   const [pagina, setPagina] = useState(1)
+  const [generandoPdf, setGenerandoPdf] = useState(false)
 
   const total = servicios.length
 
@@ -159,6 +165,38 @@ export function RadiografiaTecnico({
     )
   }
 
+  // Exportación en 1 clic: respeta los chips de servicio activos y el orden actual.
+  async function descargarPlanilla() {
+    if (ordenados.length === 0) {
+      notificar('Este técnico no tiene órdenes para exportar.', 'error')
+      return
+    }
+    setGenerandoPdf(true)
+    try {
+      const { exportarVistaActualPdf, nombreVistaTacticaPdf } = await import(
+        '../../services/pdfGenerator'
+      )
+      const ciudadesUnicas = [...new Set(ordenados.map((s) => s.ciudad))].sort()
+      const doc = await exportarVistaActualPdf(ordenados, [tecnico], {
+        conteo: ordenados.length,
+        ciudad: ciudadesUnicas.join(', ') || 'Todas',
+        barrio: 'Todas',
+        tecnico: tecnico.nombre,
+        columna: orden.columna,
+        direccion: orden.direccion,
+      })
+      doc.save(nombreVistaTacticaPdf(ordenados, [tecnico]))
+      notificar(`Planilla de ${tecnico.nombre} descargada con éxito.`, 'success')
+    } catch (error) {
+      notificar(
+        error instanceof Error ? error.message : 'No se pudo generar el PDF.',
+        'error',
+      )
+    } finally {
+      setGenerandoPdf(false)
+    }
+  }
+
   return (
     <section className="relative overflow-hidden rounded-2xl bg-slate-900 p-5 text-slate-100 shadow-lg ring-1 ring-cyan-400/25">
       {/* Cabecera */}
@@ -178,13 +216,28 @@ export function RadiografiaTecnico({
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={onVerVistaGlobal}
-          className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-xs font-medium text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
-        >
-          <X className="size-3.5" /> Ver Vista Global
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void descargarPlanilla()}
+            disabled={generandoPdf || ordenados.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 ring-1 ring-emerald-500/30 transition hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {generandoPdf ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <FileDown className="size-3.5" />
+            )}
+            {generandoPdf ? 'Generando…' : 'Descargar Planilla PDF'}
+          </button>
+          <button
+            type="button"
+            onClick={onVerVistaGlobal}
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-xs font-medium text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
+          >
+            <X className="size-3.5" /> Ver Vista Global
+          </button>
+        </div>
       </header>
 
       {/* Desglose de tipos de servicio (chips interactivos) */}
@@ -367,10 +420,14 @@ export function RadiografiaTecnico({
                     <ThOrdenable label="Días" columna="dias" orden={orden} onOrdenar={ordenarPor} />
                     <ThOrdenable label="Orden #" columna="orden" orden={orden} onOrdenar={ordenarPor} />
                     <ThOrdenable label="Ciudad" columna="ciudad" orden={orden} onOrdenar={ordenarPor} />
-                    <ThOrdenable label="Barrio" columna="barrio" orden={orden} onOrdenar={ordenarPor} />
-                    <th className="px-3 py-1.5 font-semibold">Dirección</th>
                     <ThOrdenable
-                      label="Cliente / Ref"
+                      label="Barrio / Dirección"
+                      columna="barrio"
+                      orden={orden}
+                      onOrdenar={ordenarPor}
+                    />
+                    <ThOrdenable
+                      label="Cliente / Ref. Pago"
                       columna="cliente"
                       orden={orden}
                       onOrdenar={ordenarPor}
@@ -398,8 +455,10 @@ export function RadiografiaTecnico({
                           <span className="font-semibold">{s.ciudad}</span>
                         </span>
                       </td>
-                      <td className="px-3 py-1.5 text-slate-300">{s.barrio}</td>
-                      <td className="px-3 py-1.5 text-slate-300">{s.direccion || '—'}</td>
+                      <td className="px-3 py-1.5">
+                        <p className="font-semibold text-slate-100">{s.barrio || '—'}</p>
+                        <p className="text-[11px] text-slate-400">{s.direccion || '—'}</p>
+                      </td>
                       <td className="px-3 py-1.5">
                         <p className="font-semibold text-slate-100">
                           {s.nombre_cliente || 'SIN NOMBRE'}
