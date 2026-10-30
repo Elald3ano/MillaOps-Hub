@@ -17,6 +17,8 @@ import type {
 type TecnicoRow = Database['public']['Tables']['tecnicos']['Row']
 type ReglaRow = Database['public']['Tables']['reglas_asignacion']['Row']
 type ServicioRow = Database['public']['Tables']['servicios']['Row']
+type AuditoriaCierresRow = Database['public']['Tables']['auditorias_cierres']['Row']
+type AuditoriaCierresInsert = Database['public']['Tables']['auditorias_cierres']['Insert']
 
 // Supabase limita el payload de una inserción; se particiona en lotes de 500.
 const TAMANO_LOTE_INSERCION = 500
@@ -606,4 +608,33 @@ export async function asignarCuadrilla(
   // 5. Re-aplicar la matriz al despacho activo y devolver el total insertado.
   await reasignarServiciosActivos()
   return registros.length
+}
+
+/**
+ * Persiste el resultado de una auditoría de cierres en la nube (histórico
+ * multiusuario). `datos_resultado` es el objeto completo `ResultadoCierres`,
+ * que Supabase serializa a JSONB.
+ */
+export async function guardarAuditoriaCierres(payload: AuditoriaCierresInsert): Promise<void> {
+  const { error } = await supabase.from('auditorias_cierres').insert(payload)
+  if (error) throw new Error(`No se pudo guardar la auditoría: ${error.message}`)
+}
+
+/**
+ * Devuelve la última auditoría guardada (ordenada por `created_at`), o `null`
+ * si no hay registros o la tabla aún no existe (migración pendiente).
+ */
+export async function getUltimaAuditoriaCierres(): Promise<AuditoriaCierresRow | null> {
+  const { data, error } = await supabase
+    .from('auditorias_cierres')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    console.warn('[MillaOps Hub] No se pudo leer auditorias_cierres:', error.message)
+    return null
+  }
+  return data
 }

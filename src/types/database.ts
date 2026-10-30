@@ -1,4 +1,5 @@
 import type { EstadoServicio } from './index'
+import type { ResultadoCierres } from '../services/reconciliationService'
 
 /**
  * Tipos de la base de datos de Supabase (esquema `public`).
@@ -172,6 +173,45 @@ export type Database = {
           dias_antiguedad?: number
           tecnico_id?: string | null
           estado?: EstadoServicio
+          created_at?: string
+        }
+        Relationships: []
+      }
+      auditorias_cierres: {
+        Row: {
+          id: string
+          nombre_archivo_anterior: string
+          fecha_corte_anterior: string
+          nombre_archivo_actual: string
+          fecha_corte_actual: string
+          total_cerrados: number
+          total_nuevos: number
+          datos_resultado: ResultadoCierres
+          creado_por: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          nombre_archivo_anterior: string
+          fecha_corte_anterior: string
+          nombre_archivo_actual: string
+          fecha_corte_actual?: string
+          total_cerrados?: number
+          total_nuevos?: number
+          datos_resultado: ResultadoCierres
+          creado_por?: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          nombre_archivo_anterior?: string
+          fecha_corte_anterior?: string
+          nombre_archivo_actual?: string
+          fecha_corte_actual?: string
+          total_cerrados?: number
+          total_nuevos?: number
+          datos_resultado?: ResultadoCierres
+          creado_por?: string
           created_at?: string
         }
         Relationships: []

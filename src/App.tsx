@@ -20,6 +20,7 @@ import {
   getReglas,
   getServiciosActivos,
   getTecnicos,
+  getUltimaAuditoriaCierres,
   reasignarServiciosActivos,
   reemplazarServiciosActivos,
 } from './services/supabaseService'
@@ -59,6 +60,8 @@ function App() {
   const [resultadoCierres, setResultadoCierres] = useState<ResultadoCierres | null>(null)
   const [corteAyerNombre, setCorteAyerNombre] = useState('')
   const [corteHoyNombre, setCorteHoyNombre] = useState('')
+  const [fechaCorteAnterior, setFechaCorteAnterior] = useState<Date | null>(null)
+  const [fechaCorteActual, setFechaCorteActual] = useState<Date | null>(null)
   const [ciudadesActivas, setCiudadesActivas] = useState<Record<string, string[]>>({})
 
   const notificar = useCallback((mensaje: string, variant: ToastVariant = 'info') => {
@@ -120,6 +123,31 @@ function App() {
     // oxlint-disable-next-line react/set-state-in-effect
     void cargarDatos()
   }, [cargarDatos])
+
+  // Hidrata la última auditoría guardada en la nube (persistencia tras F5 y
+  // para compañeros). Silencioso si la tabla aún no existe (migración pendiente).
+  const cargarUltimaAuditoria = useCallback(async () => {
+    try {
+      const ultima = await getUltimaAuditoriaCierres()
+      if (!ultima) return
+      setResultadoCierres(ultima.datos_resultado)
+      setCorteAyerNombre(ultima.nombre_archivo_anterior)
+      setCorteHoyNombre(ultima.nombre_archivo_actual)
+      setFechaCorteAnterior(
+        ultima.fecha_corte_anterior ? new Date(ultima.fecha_corte_anterior) : null,
+      )
+      setFechaCorteActual(
+        ultima.fecha_corte_actual ? new Date(ultima.fecha_corte_actual) : null,
+      )
+    } catch {
+      // Silencioso: la tabla puede no existir aún (migración pendiente).
+    }
+  }, [])
+
+  useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect
+    void cargarUltimaAuditoria()
+  }, [cargarUltimaAuditoria])
 
   const tecnicoSeleccionado = useMemo(
     () => tecnicos.find((t) => t.id === tecnicoSeleccionadoId) ?? null,
@@ -478,6 +506,10 @@ function App() {
                 corteHoyNombre={corteHoyNombre}
                 onCorteAyerNombre={setCorteAyerNombre}
                 onCorteHoyNombre={setCorteHoyNombre}
+                fechaCorteAnterior={fechaCorteAnterior}
+                fechaCorteActual={fechaCorteActual}
+                onFechaCorteAnterior={setFechaCorteAnterior}
+                onFechaCorteActual={setFechaCorteActual}
               />
             ) : tecnicoSeleccionado ? (
               <DetalleTecnicoTerritorio

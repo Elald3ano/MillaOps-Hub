@@ -6,6 +6,8 @@ import {
   calcularCierres,
   type ResultadoCierres,
 } from '../../services/reconciliationService'
+import { extraerFechaDeNombreSigma, formatearFechaHora } from '../../lib/dateParser'
+import { guardarAuditoriaCierres } from '../../services/supabaseService'
 import { cn } from '../../lib/utils'
 import { RankingCierres } from './RankingCierres'
 import { RadiografiaCierres } from './RadiografiaCierres'
@@ -23,6 +25,10 @@ interface AuditoriaCierresDashboardProps {
   corteHoyNombre: string
   onCorteAyerNombre: (s: string) => void
   onCorteHoyNombre: (s: string) => void
+  fechaCorteAnterior: Date | null
+  fechaCorteActual: Date | null
+  onFechaCorteAnterior: (d: Date | null) => void
+  onFechaCorteActual: (d: Date | null) => void
 }
 
 function formatearTamano(bytes: number): string {
@@ -122,6 +128,10 @@ export function AuditoriaCierresDashboard({
   corteHoyNombre,
   onCorteAyerNombre,
   onCorteHoyNombre,
+  fechaCorteAnterior,
+  fechaCorteActual,
+  onFechaCorteAnterior,
+  onFechaCorteActual,
 }: AuditoriaCierresDashboardProps) {
   const [archivoAyer, setArchivoAyer] = useState<File | null>(null)
   const [usarDespachoActivo, setUsarDespachoActivo] = useState(true)
@@ -165,12 +175,41 @@ export function AuditoriaCierresDashboard({
       onCorteAyerNombre(archivoAyer.name)
 
       const res = calcularCierres(ayerServicios, hoyServicios, reglas)
+
+      // Fechas de corte: extrae la del nombre del archivo anterior (Sigma).
+      const fechaAnterior = extraerFechaDeNombreSigma(archivoAyer.name)
+      const fechaActual = usarDespachoActivo
+        ? new Date()
+        : (extraerFechaDeNombreSigma(archivoHoy?.name ?? '') ?? new Date())
+
+      // Estado local inmediato (la UI se actualiza sin esperar la red).
       onResultado(res)
+      onFechaCorteAnterior(fechaAnterior)
+      onFechaCorteActual(fechaActual)
       setTecnicoSeleccionadoId(null)
-      notificar(
-        `Auditoría completada: ${res.cerrados.length} cerrados y ${res.nuevos.length} nuevos.`,
-        'success',
-      )
+
+      // Persistencia multiusuario en la nube.
+      try {
+        await guardarAuditoriaCierres({
+          nombre_archivo_anterior: archivoAyer.name,
+          fecha_corte_anterior: (fechaAnterior ?? new Date()).toISOString(),
+          nombre_archivo_actual: usarDespachoActivo
+            ? 'Despacho activo'
+            : (archivoHoy?.name ?? ''),
+          fecha_corte_actual: fechaActual.toISOString(),
+          total_cerrados: res.cerrados.length,
+          total_nuevos: res.nuevos.length,
+          datos_resultado: res,
+        })
+        notificar('Auditoría calculada y sincronizada en la nube.', 'success')
+      } catch (error) {
+        notificar(
+          `Auditoría calculada, pero no se pudo sincronizar en la nube: ${
+            error instanceof Error ? error.message : 'error desconocido'
+          }.`,
+          'error',
+        )
+      }
     } catch (error) {
       notificar(
         error instanceof Error ? error.message : 'No se pudo auditar los cierres.',
@@ -269,6 +308,12 @@ export function AuditoriaCierresDashboard({
               <span className="inline-flex items-center gap-1.5 rounded-lg bg-sky-500/15 px-3 py-2 text-xs font-semibold text-sky-300 ring-1 ring-sky-500/30">
                 {resultado.nuevos.length} nuevos ingresos
               </span>
+              {fechaCorteAnterior && fechaCorteActual && (
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-2 text-xs font-semibold text-slate-200 ring-1 ring-white/15">
+                  ⏱️ Rango: {formatearFechaHora(fechaCorteAnterior)} ➔{' '}
+                  {formatearFechaHora(fechaCorteActual)}
+                </span>
+              )}
               <span className="text-[11px] text-slate-500">
                 {corteAyerNombre || 'Ayer'} → {corteHoyNombre || 'Hoy'}
               </span>
