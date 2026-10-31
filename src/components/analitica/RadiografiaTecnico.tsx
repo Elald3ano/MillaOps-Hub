@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Copy,
   FileDown,
   Home,
+  Image,
   List,
   Loader2,
   MapPin,
@@ -16,6 +18,11 @@ import {
 import type { Servicio, Tecnico } from '../../types'
 import type { ToastVariant } from '../ToastContainer'
 import { clasificarSla, esCritica, SLA_BADGE_CLASSES } from '../../lib/sla'
+import {
+  capturarElementoComoImagen,
+  copiarImagenAlPortapapeles,
+  descargarBlob,
+} from '../../lib/imageExporter'
 import { limpiarTexto } from '../../lib/normalizer'
 import { cn } from '../../lib/utils'
 
@@ -73,6 +80,17 @@ export function RadiografiaTecnico({
   // `null` = todas las edades; número = filtrar órdenes con `dias_antiguedad >= umbralDias`.
   const [umbralDias, setUmbralDias] = useState<number | null>(null)
   const [umbralBorrador, setUmbralBorrador] = useState('')
+  const [capturando, setCapturando] = useState(false)
+  // Marca de tiempo estable por montaje: evita `new Date()` durante el render.
+  const [marcaCaptura] = useState(() =>
+    new Date().toLocaleString('es-CO', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+  )
+  const capturaRef = useRef<HTMLDivElement>(null)
 
   const total = servicios.length
 
@@ -223,9 +241,63 @@ export function RadiografiaTecnico({
     }
   }
 
+  // Nombre del PNG compartido entre la copia y la descarga directa.
+  async function nombrePng(): Promise<string> {
+    const { slugificar, marcaDeTiempo } = await import('../../services/pdfGenerator')
+    const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
+    return `PD-${slugificar(tecnico.nombre)}${sufijo}-${marcaDeTiempo()}.png`
+  }
+
+  /** Captura la tarjeta en HD y la copia al portapapeles (fallback: descarga). */
+  async function copiarParaWhatsApp() {
+    if (!capturaRef.current || capturando) return
+    setCapturando(true)
+    try {
+      const { blob } = await capturarElementoComoImagen(capturaRef.current)
+      const copiada = await copiarImagenAlPortapapeles(blob)
+      if (copiada) {
+        notificar(
+          '📋 Imagen copiada. Ve a WhatsApp y presiona Ctrl + V para enviarla.',
+          'success',
+        )
+      } else {
+        descargarBlob(blob, await nombrePng())
+        notificar(
+          'Este navegador no permite copiar imágenes; se descargó el PNG.',
+          'info',
+        )
+      }
+    } catch (error) {
+      notificar(
+        error instanceof Error ? error.message : 'No se pudo capturar la imagen.',
+        'error',
+      )
+    } finally {
+      setCapturando(false)
+    }
+  }
+
+  /** Descarga la carta del técnico como PNG HD. */
+  async function descargarPng() {
+    if (!capturaRef.current || capturando) return
+    setCapturando(true)
+    try {
+      const { blob } = await capturarElementoComoImagen(capturaRef.current)
+      descargarBlob(blob, await nombrePng())
+      notificar(`Imagen de ${tecnico.nombre} descargada.`, 'success')
+    } catch (error) {
+      notificar(
+        error instanceof Error ? error.message : 'No se pudo generar el PNG.',
+        'error',
+      )
+    } finally {
+      setCapturando(false)
+    }
+  }
+
   return (
     <section className="relative overflow-hidden rounded-2xl bg-slate-900 p-5 text-slate-100 shadow-lg ring-1 ring-cyan-400/25">
-      {/* Cabecera */}
+      {/* Cabecera (controles: fuera del área capturable) */}
       <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-cyan-500/15 ring-1 ring-cyan-400/30">
@@ -333,6 +405,27 @@ export function RadiografiaTecnico({
           </button>
           <button
             type="button"
+            onClick={() => void copiarParaWhatsApp()}
+            disabled={capturando || serviciosFiltrados.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 ring-1 ring-cyan-500/30 transition hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {capturando ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Copy className="size-3.5" />
+            )}
+            {capturando ? 'Capturando…' : 'Copiar para WhatsApp'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void descargarPng()}
+            disabled={capturando || serviciosFiltrados.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-white/5 px-2.5 py-1.5 text-xs font-medium text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Image className="size-3.5" /> PNG
+          </button>
+          <button
+            type="button"
             onClick={onVerVistaGlobal}
             className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-white/5 px-2.5 py-1.5 text-xs font-medium text-slate-300 ring-1 ring-white/10 transition hover:bg-white/10 hover:text-white"
           >
@@ -340,6 +433,46 @@ export function RadiografiaTecnico({
           </button>
         </div>
       </header>
+
+      {/* Área capturable como imagen: resumen + órdenes visibles */}
+      <div
+        ref={capturaRef}
+        className="-mx-2 rounded-xl bg-slate-900 px-2 pt-2"
+      >
+        {/* Cabecera de la carta: técnico, ciudades y fecha/hora */}
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold tracking-wide text-cyan-300 uppercase">
+              MillaOps Hub · Radiografía de despacho
+            </p>
+            <p className="truncate text-base font-bold text-white">{tecnico.nombre}</p>
+            <p className="text-[11px] text-slate-400">
+              {[...new Set(serviciosFiltrados.map((s) => s.ciudad))].sort().join(', ') ||
+                'Sin ciudad'}
+            </p>
+          </div>
+          <p className="text-[11px] text-slate-400 tabular-nums">{marcaCaptura}</p>
+        </div>
+
+        {/* Cajas de resumen */}
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <div className="rounded-lg bg-white/5 px-3 py-2 ring-1 ring-white/10">
+            <p className="text-[10px] font-semibold tracking-wide text-slate-400 uppercase">
+              Total órdenes
+            </p>
+            <p className="text-lg font-bold text-white tabular-nums">
+              {serviciosFiltrados.length}
+            </p>
+          </div>
+          <div className="rounded-lg bg-red-500/10 px-3 py-2 ring-1 ring-red-500/30">
+            <p className="text-[10px] font-semibold tracking-wide text-red-300 uppercase">
+              Críticas (3+ días)
+            </p>
+            <p className="text-lg font-bold text-red-300 tabular-nums">
+              {serviciosFiltrados.filter((s) => esCritica(s.dias_antiguedad)).length}
+            </p>
+          </div>
+        </div>
 
       {/* Desglose de tipos de servicio (chips interactivos) */}
       <div className="mb-4">
@@ -614,6 +747,7 @@ export function RadiografiaTecnico({
           )}
         </div>
       )}
+      </div>
     </section>
   )
 }
