@@ -212,6 +212,27 @@ export async function actualizarTecnico(
   return mapTecnico(data)
 }
 
+/**
+ * Desvincula en cascada los operadores que dependen de una patrulla
+ * (`UPDATE tecnicos SET patrulla_id = NULL WHERE patrulla_id = $id`).
+ *
+ * Replica el comportamiento `ON DELETE SET NULL` de la FK: si una patrulla se
+ * degrada a operador, sus operadores quedan huérfanos e independientes en vez
+ * de apuntar a una ficha que ya no supervisa. Devuelve cuántos se liberaron.
+ */
+export async function desvincularOperadoresDePatrulla(patrullaId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from('tecnicos')
+    .update({ patrulla_id: null })
+    .eq('patrulla_id', patrullaId)
+    .select('id')
+
+  if (error) {
+    throw new Error(`No se pudieron desvincular los operadores de la patrulla: ${error.message}`)
+  }
+  return data?.length ?? 0
+}
+
 /** Devuelve las reglas de asignación con su técnico relacionado. */
 export async function getReglas(): Promise<ReglaConTecnico[]> {
   const [reglasResult, tecnicosResult] = await Promise.all([

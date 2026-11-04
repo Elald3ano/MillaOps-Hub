@@ -437,13 +437,16 @@ function App() {
               />
             ) : tecnicoSeleccionado ? (
               <DetalleTecnicoTerritorio
+                key={tecnicoSeleccionado.id}
                 tecnico={tecnicoSeleccionado}
+                tecnicos={tecnicos}
                 reglas={reglas}
                 servicios={serviciosActivos}
                 ciudadesActivas={ciudadesActivas[tecnicoSeleccionado.id] ?? []}
                 onVolver={() => void volverAlDirectorio()}
                 notificar={notificar}
                 onCambio={refrescarTrasGuardarCuadrilla}
+                onActualizado={refrescarTerritorio}
               />
             ) : (
               <DirectorioTecnicos

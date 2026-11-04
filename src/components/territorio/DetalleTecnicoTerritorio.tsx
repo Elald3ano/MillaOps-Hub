@@ -2,19 +2,26 @@ import { useMemo, useState } from 'react'
 import {
   ArrowLeft,
   Bike,
+  Car,
   Check,
   CheckSquare,
   Loader2,
   MapPin,
+  Pencil,
+  Phone,
   Save,
   Search,
   Settings2,
+  Shield,
   Square,
   Truck,
+  Users,
 } from 'lucide-react'
 import { Modal } from '../Modal'
 import {
+  actualizarTecnico,
   asignarCuadrilla,
+  desvincularOperadoresDePatrulla,
   guardarCiudadesActivasTecnico,
 } from '../../services/supabaseService'
 import { limpiarBarrio, limpiarPrefijoNodo, limpiarTexto } from '../../lib/normalizer'
@@ -26,6 +33,7 @@ import type { ToastVariant } from '../ToastContainer'
 
 interface DetalleTecnicoTerritorioProps {
   tecnico: Tecnico
+  tecnicos: Tecnico[]
   reglas: ReglaConTecnico[]
   servicios: Servicio[]
   ciudadesActivas: string[]
@@ -33,6 +41,8 @@ interface DetalleTecnicoTerritorioProps {
   notificar: (mensaje: string, variant?: ToastVariant) => void
   /** Refresca reglas y servicios en el padre tras guardar una cuadrilla. */
   onCambio?: () => Promise<void>
+  /** Refresca el directorio tras guardar la ficha técnica o los operadores a cargo. */
+  onActualizado?: () => Promise<void>
 }
 
 // Estado editable de la cuadrilla de una ciudad.
@@ -101,15 +111,56 @@ function derivarConfigs(
   return resultado
 }
 
+const BASE_BADGE =
+  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1'
+
+/** Badge de rol con el mismo lenguaje visual que el directorio. */
+function BadgeRol({ rol }: { rol: Tecnico['rol'] }) {
+  if (rol === 'patrulla') {
+    return (
+      <span
+        className={cn(
+          BASE_BADGE,
+          'bg-indigo-500/15 text-indigo-300 ring-indigo-500/30',
+        )}
+      >
+        <Truck className="size-3" />
+        Patrulla
+      </span>
+    )
+  }
+
+  if (rol === 'operador') {
+    return (
+      <span
+        className={cn(BASE_BADGE, 'bg-cyan-500/15 text-cyan-300 ring-cyan-500/30')}
+      >
+        <Bike className="size-3" />
+        Operador
+      </span>
+    )
+  }
+
+  return (
+    <span
+      className={cn(BASE_BADGE, 'bg-slate-700/60 text-slate-400 ring-slate-600/40')}
+    >
+      Sin clasificar
+    </span>
+  )
+}
+
 /** Tablero de asignación por cuadrilla (general o flotante) para un técnico. */
 export function DetalleTecnicoTerritorio({
   tecnico,
+  tecnicos,
   reglas,
   servicios,
   ciudadesActivas,
   onVolver,
   notificar,
   onCambio,
+  onActualizado,
 }: DetalleTecnicoTerritorioProps) {
   const [modalCiudades, setModalCiudades] = useState(false)
   const [busquedaCiudad, setBusquedaCiudad] = useState('')
@@ -117,6 +168,55 @@ export function DetalleTecnicoTerritorio({
   const [guardandoCuadrilla, setGuardandoCuadrilla] = useState<string | null>(null)
   const [busquedaServicio, setBusquedaServicio] = useState<Record<string, string>>({})
   const [transferencia, setTransferencia] = useState<TransferenciaPendiente | null>(null)
+
+  // Ficha técnica (edición) y gestión de operadores a cargo (patrullas).
+  const [modalEditar, setModalEditar] = useState(false)
+  const [editNombre, setEditNombre] = useState('')
+  const [editDocumento, setEditDocumento] = useState('')
+  const [editTelefono, setEditTelefono] = useState('')
+  const [editPlaca, setEditPlaca] = useState('')
+  const [editRol, setEditRol] = useState<'operador' | 'patrulla'>('operador')
+  const [editPatrullaId, setEditPatrullaId] = useState('')
+  const [guardandoFicha, setGuardandoFicha] = useState(false)
+  const [guardandoPatrulla, setGuardandoPatrulla] = useState(false)
+  const [guardandoOperadores, setGuardandoOperadores] = useState(false)
+  const esPatrulla = tecnico.rol === 'patrulla'
+
+  // Operadores que ya dependen de esta patrulla.
+  const operadoresAsignados = useMemo(
+    () => tecnicos.filter((t) => t.patrulla_id === tecnico.id && t.id !== tecnico.id),
+    [tecnicos, tecnico.id],
+  )
+
+  // Mantiene el checklist alineado con la fuente de verdad tras cada refresco
+  // (guardar ficha, guardar operadores u otro cambio externo). Sin esto, el
+  // estado inicial del useState quedaría congelado en el primer montaje.
+  const [seleccionManual, setOperadoresSeleccionados] = useState<Set<string> | null>(null)
+  const operadoresSeleccionados =
+    seleccionManual ?? new Set(operadoresAsignados.map((t) => t.id))
+  // Candidatos para el selector de operadores a cargo.
+  const operadoresDisponibles = useMemo(
+    () =>
+      tecnicos
+        .filter((t) => t.rol === 'operador' && t.id !== tecnico.id)
+        .sort((a, b) => a.nombre.localeCompare(b.nombre)),
+    [tecnicos, tecnico.id],
+  )
+
+  // Patrullas asignables (nunca el propio técnico, nunca un operador).
+  const patrullasDisponibles = useMemo(
+    () =>
+      tecnicos
+        .filter((t) => t.rol === 'patrulla' && t.id !== tecnico.id)
+        .sort((a, b) => a.nombre.localeCompare(b.nombre)),
+    [tecnicos, tecnico.id],
+  )
+
+  const nombrePorId = useMemo(
+    () => new Map(tecnicos.map((t) => [t.id, t.nombre])),
+    [tecnicos],
+  )
+
 
   // Todas las ciudades conocidas (reglas + servicios), en forma canónica.
   const todasLasCiudades = useMemo(() => {
@@ -288,6 +388,136 @@ export function DetalleTecnicoTerritorio({
     })
   }
 
+  function toggleOperador(operadorId: string) {
+    setOperadoresSeleccionados((prev) => {
+      // Primer clic: materializa el valor derivado de la BD.
+      const base = prev ?? new Set(operadoresAsignados.map((t) => t.id))
+      const next = new Set(base)
+      if (next.has(operadorId)) next.delete(operadorId)
+      else next.add(operadorId)
+      return next
+    })
+  }
+
+  async function handleCambiarPatrulla(valor: string) {
+    // Salvaguarda: una patrulla nunca puede depender de sí misma.
+    const patrullaId = valor === tecnico.id ? null : valor || null
+    setGuardandoPatrulla(true)
+    try {
+      await actualizarTecnico(tecnico.id, { patrulla_id: patrullaId })
+      notificar('Patrulla asignada actualizada.', 'success')
+      await onActualizado?.()
+      await onCambio?.()
+    } catch (e) {
+      notificar(
+        e instanceof Error ? e.message : 'No se pudo asignar la patrulla.',
+        'error',
+      )
+    } finally {
+      setGuardandoPatrulla(false)
+    }
+  }
+
+  async function guardarOperadores() {
+    const cambios = operadoresDisponibles.filter((operador) => {
+      const marcado = operadoresSeleccionados.has(operador.id)
+      const pertenece = operador.patrulla_id === tecnico.id
+      return marcado !== pertenece
+    })
+
+    if (cambios.length === 0) {
+      notificar('No hay cambios en los operadores a cargo.', 'info')
+      return
+    }
+
+    setGuardandoOperadores(true)
+    try {
+      await Promise.all(
+        cambios.map((operador) =>
+          actualizarTecnico(operador.id, {
+            patrulla_id: operadoresSeleccionados.has(operador.id) ? tecnico.id : null,
+          }),
+        ),
+      )
+      notificar('Operadores a cargo actualizados.', 'success')
+      await onActualizado?.()
+      await onCambio?.()
+    } catch (e) {
+      notificar(
+        e instanceof Error ? e.message : 'No se pudieron guardar los operadores.',
+        'error',
+      )
+    } finally {
+      setGuardandoOperadores(false)
+    }
+  }
+
+  function abrirModalEditar() {
+    setEditNombre(tecnico.nombre)
+    setEditDocumento(tecnico.documento ?? '')
+    setEditTelefono(tecnico.telefono ?? '')
+    setEditPlaca(tecnico.placa ?? '')
+    setEditRol(tecnico.rol === 'patrulla' ? 'patrulla' : 'operador')
+    setEditPatrullaId(tecnico.patrulla_id ?? '')
+    setModalEditar(true)
+  }
+
+  function seleccionarRolEdicion(rol: 'operador' | 'patrulla') {
+    setEditRol(rol)
+    // Una patrulla no depende de otra patrulla y, al pasar de patrulla a
+    // operador, la asignación previa se limpia (patrulla_id: null).
+    if (rol === 'patrulla' || tecnico.rol === 'patrulla') setEditPatrullaId('')
+  }
+
+  async function guardarFicha() {
+    const nombre = editNombre.trim()
+    if (!nombre) {
+      notificar('El nombre completo es obligatorio.', 'error')
+      return
+    }
+
+    // Salvaguarda: nunca asignar la propia patrulla.
+    const patrullaId =
+      editRol === 'operador' && editPatrullaId !== tecnico.id
+        ? editPatrullaId || null
+        : null
+
+    setGuardandoFicha(true)
+    try {
+      // Degradar una patrulla a operador desvincula en cascada a sus operadores
+      // (equivale al ON DELETE SET NULL de la FK). La nueva ficha nace sin patrulla.
+      let liberados = 0
+      if (tecnico.rol === 'patrulla' && editRol === 'operador') {
+        liberados = await desvincularOperadoresDePatrulla(tecnico.id)
+      }
+
+      await actualizarTecnico(tecnico.id, {
+        nombre,
+        documento: editDocumento,
+        telefono: editTelefono,
+        placa: editPlaca,
+        rol: editRol,
+        patrulla_id: patrullaId,
+      })
+      setModalEditar(false)
+      notificar(
+        liberados > 0
+          ? `Ficha actualizada. ${liberados} ${liberados === 1 ? 'operador quedó' : 'operadores quedaron'} sin patrulla.`
+          : 'Ficha técnica actualizada.',
+        'success',
+      )
+      await onActualizado?.()
+      await onCambio?.()
+    } catch (e) {
+      notificar(
+        e instanceof Error ? e.message : 'No se pudo guardar la ficha técnica.',
+        'error',
+      )
+    } finally {
+      setGuardandoFicha(false)
+    }
+  }
+
   const ciudadesOrdenadas = [...ciudadesActivasLocales].sort((a, b) => a.localeCompare(b))
   const ciudadesFiltradas = todasLasCiudades.filter((c) =>
     c.toLowerCase().includes(busquedaCiudad.trim().toLowerCase()),
@@ -297,8 +527,8 @@ export function DetalleTecnicoTerritorio({
     <div className="space-y-5">
       {/* Cabecera */}
       <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5 shadow-xl shadow-slate-900/20">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3">
             <button
               type="button"
               onClick={onVolver}
@@ -308,24 +538,201 @@ export function DetalleTecnicoTerritorio({
             </button>
             <div>
               <h2 className="text-lg font-bold text-white">{tecnico.nombre}</h2>
-              <p className="text-xs text-slate-400">
-                {ciudadesOrdenadas.length}{' '}
-                {ciudadesOrdenadas.length === 1 ? 'ciudad activa' : 'ciudades activas'}
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <BadgeRol rol={tecnico.rol} />
+                {tecnico.documento && (
+                  <span
+                    className={cn(
+                      BASE_BADGE,
+                      'bg-slate-700/60 text-slate-300 ring-slate-600/40',
+                    )}
+                  >
+                    <Shield className="size-3" />
+                    C.C. {tecnico.documento}
+                  </span>
+                )}
+                {tecnico.telefono && (
+                  <span
+                    className={cn(
+                      BASE_BADGE,
+                      'bg-slate-700/60 text-slate-300 ring-slate-600/40',
+                    )}
+                  >
+                    <Phone className="size-3" />
+                    {tecnico.telefono}
+                  </span>
+                )}
+                {tecnico.placa && (
+                  <span
+                    className={cn(
+                      BASE_BADGE,
+                      'bg-slate-700/60 text-slate-300 ring-slate-600/40',
+                    )}
+                  >
+                    <Car className="size-3" />
+                    Placa: {tecnico.placa}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-slate-400">
+                {esPatrulla
+                  ? `${operadoresAsignados.length} ${
+                      operadoresAsignados.length === 1
+                        ? 'operador a cargo'
+                        : 'operadores a cargo'
+                    }`
+                  : `${ciudadesOrdenadas.length} ${
+                      ciudadesOrdenadas.length === 1
+                        ? 'ciudad activa'
+                        : 'ciudades activas'
+                    }`}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => setModalCiudades(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
-          >
-            <Settings2 className="size-4" /> Gestionar Ciudades
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {!esPatrulla && (
+              <button
+                type="button"
+                onClick={() => setModalCiudades(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-slate-600"
+              >
+                <Settings2 className="size-4" /> Gestionar Ciudades
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={abrirModalEditar}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-400"
+            >
+              <Pencil className="size-4" /> Editar Ficha
+            </button>
+          </div>
         </div>
+
+        {!esPatrulla && (
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-4">
+            <label
+              htmlFor="patrulla-asignada"
+              className="text-xs font-semibold tracking-wide text-slate-400 uppercase"
+            >
+              Patrulla Asignada
+            </label>
+            <select
+              id="patrulla-asignada"
+              value={tecnico.patrulla_id ?? ''}
+              onChange={(e) => void handleCambiarPatrulla(e.target.value)}
+              disabled={guardandoPatrulla}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-200 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 disabled:opacity-50"
+            >
+              <option value="">— Sin patrulla —</option>
+              {patrullasDisponibles.map((patrulla) => (
+                <option key={patrulla.id} value={patrulla.id}>
+                  {patrulla.nombre}
+                </option>
+              ))}
+            </select>
+            {guardandoPatrulla && <Loader2 className="size-4 animate-spin text-slate-400" />}
+          </div>
+        )}
       </div>
 
-      {/* Tableros por ciudad */}
-      {ciudadesOrdenadas.length === 0 ? (
+      {/* Tarjeta de patrulla: su territorio es la unión de sus operadores */}
+      {esPatrulla && (
+        <div className="rounded-2xl border border-indigo-500/30 bg-slate-900 p-5 shadow-xl shadow-slate-900/20">
+          <div className="mb-3 flex items-center gap-2">
+            <Users className="size-4 text-indigo-300" />
+            <h3 className="text-base font-semibold text-white">Operadores a Cargo</h3>
+            <span
+              className={cn(
+                BASE_BADGE,
+                'ml-auto bg-indigo-500/15 text-indigo-300 ring-indigo-500/30',
+              )}
+            >
+              {operadoresSeleccionados.size} seleccionados
+            </span>
+          </div>
+          <p className="mb-4 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-[11px] leading-relaxed text-indigo-200">
+            La patrulla no tiene barrios propios: su territorio es la unión de los
+            barrios de sus operadores.
+          </p>
+
+          {operadoresDisponibles.length === 0 ? (
+            <p className="py-6 text-center text-xs text-slate-500">
+              No hay operadores registrados para asignar.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-1 sm:grid-cols-2 xl:grid-cols-3">
+              {operadoresDisponibles.map((operador) => {
+                const activo = operadoresSeleccionados.has(operador.id)
+                const patrullaActual = operador.patrulla_id
+                  ? (nombrePorId.get(operador.patrulla_id) ?? null)
+                  : null
+                return (
+                  <label
+                    key={operador.id}
+                    className={cn(
+                      'flex cursor-pointer select-none items-center gap-2.5 rounded-lg border p-2 transition-colors',
+                      activo
+                        ? 'border-indigo-500/60 bg-indigo-500/15 text-indigo-100'
+                        : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:bg-slate-800/60',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={activo}
+                      onChange={() => toggleOperador(operador.id)}
+                      className="sr-only"
+                    />
+                    <span
+                      className={cn(
+                        'flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-all',
+                        activo
+                          ? 'border-indigo-500 bg-indigo-600'
+                          : 'border-slate-600 bg-slate-950',
+                      )}
+                    >
+                      {activo && <Check className="h-3 w-3 text-white" strokeWidth={3} />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium leading-tight">
+                        {operador.nombre}
+                      </span>
+                      {patrullaActual && (
+                        <span className="block text-[10px] text-slate-500">
+                          Patrulla actual: {patrullaActual}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          )}
+
+          <div className="mt-4 flex items-center justify-between border-t border-slate-800 pt-3">
+            <p className="text-xs text-slate-500">
+              {operadoresAsignados.length} operadores vinculados actualmente
+            </p>
+            <button
+              type="button"
+              onClick={() => void guardarOperadores()}
+              disabled={guardandoOperadores}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {guardandoOperadores ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <Save className="size-4" />
+              )}
+              Guardar Operadores a Cargo
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Tableros por ciudad (solo operadores o sin rol) */}
+      {!esPatrulla &&
+        (ciudadesOrdenadas.length === 0 ? (
         <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-16 text-center">
           <p className="text-sm font-medium text-slate-300">Sin ciudades activas</p>
           <p className="mt-1 text-xs text-slate-500">
@@ -657,7 +1064,7 @@ export function DetalleTecnicoTerritorio({
             </div>
           )
         })
-      )}
+      ))}
 
       {/* Modal Gestionar Ciudades */}
       <Modal
@@ -729,6 +1136,175 @@ export function DetalleTecnicoTerritorio({
         {ciudadesFiltradas.length === 0 && (
           <p className="py-6 text-center text-sm text-slate-500">Sin coincidencias.</p>
         )}
+      </Modal>
+
+      {/* Modal Editar Ficha Técnica */}
+      <Modal
+        abierto={modalEditar}
+        onCerrar={() => {
+          if (!guardandoFicha) setModalEditar(false)
+        }}
+        titulo="Editar Ficha Técnica"
+        descripcion="Actualiza los datos personales y el rol territorial del técnico."
+        anchoMaximo="max-w-lg"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setModalEditar(false)}
+              disabled={guardandoFicha}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={() => void guardarFicha()}
+              disabled={guardandoFicha}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-400 disabled:opacity-50"
+            >
+              {guardandoFicha && <Loader2 className="size-4 animate-spin" />}
+              Guardar Ficha
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label
+              htmlFor="editar-nombre"
+              className="mb-1 block text-sm font-medium text-slate-700"
+            >
+              Nombre Completo <span className="text-red-500">*</span>
+            </label>
+            <input
+              id="editar-nombre"
+              type="text"
+              value={editNombre}
+              onChange={(e) => setEditNombre(e.target.value)}
+              placeholder="Ej: Juan Pérez"
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="editar-documento"
+              className="mb-1 block text-sm font-medium text-slate-700"
+            >
+              Cédula / Documento
+            </label>
+            <input
+              id="editar-documento"
+              type="text"
+              value={editDocumento}
+              onChange={(e) => setEditDocumento(e.target.value)}
+              placeholder="Ej: 1234567890"
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label
+                htmlFor="editar-telefono"
+                className="mb-1 block text-sm font-medium text-slate-700"
+              >
+                Teléfono / Celular
+              </label>
+              <input
+                id="editar-telefono"
+                type="tel"
+                value={editTelefono}
+                onChange={(e) => setEditTelefono(e.target.value)}
+                placeholder="Ej: 300 123 4567"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="editar-placa"
+                className="mb-1 block text-sm font-medium text-slate-700"
+              >
+                Placa del vehículo
+              </label>
+              <input
+                id="editar-placa"
+                type="text"
+                value={editPlaca}
+                onChange={(e) => setEditPlaca(e.target.value)}
+                placeholder="Ej: ABC12D"
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+              />
+            </div>
+          </div>
+
+          <div>
+            <p className="mb-1 block text-sm font-medium text-slate-700">Rol</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => seleccionarRolEdicion('operador')}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium transition',
+                  editRol === 'operador'
+                    ? 'border-cyan-500 bg-cyan-500/10 text-cyan-700'
+                    : 'border-slate-300 text-slate-500 hover:bg-slate-50',
+                )}
+              >
+                <Bike className="size-4 shrink-0" />
+                <span>
+                  Operador de Zona
+                  <span className="block text-[11px] font-normal text-slate-500">
+                    Moto · Servicios específicos
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => seleccionarRolEdicion('patrulla')}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium transition',
+                  editRol === 'patrulla'
+                    ? 'border-indigo-500 bg-indigo-500/10 text-indigo-700'
+                    : 'border-slate-300 text-slate-500 hover:bg-slate-50',
+                )}
+              >
+                <Truck className="size-4 shrink-0" />
+                <span>
+                  Patrulla de Zona
+                  <span className="block text-[11px] font-normal text-slate-500">
+                    Carro · Coordina operadores
+                  </span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {editRol === 'operador' && (
+            <div>
+              <label
+                htmlFor="editar-patrulla"
+                className="mb-1 block text-sm font-medium text-slate-700"
+              >
+                Patrulla Asignada (opcional)
+              </label>
+              <select
+                id="editar-patrulla"
+                value={editPatrullaId}
+                onChange={(e) => setEditPatrullaId(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+              >
+                <option value="">— Sin patrulla —</option>
+                {patrullasDisponibles.map((patrulla) => (
+                  <option key={patrulla.id} value={patrulla.id}>
+                    {patrulla.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
       </Modal>
 
       {/* Modal Confirmar Transferencia de Barrio */}
