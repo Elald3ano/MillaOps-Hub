@@ -22,7 +22,18 @@ CREATE TABLE IF NOT EXISTS tecnicos (
   telefono   TEXT,
   documento  TEXT,
   activo     BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Células territoriales: `rol` clasifica al técnico (NULL hasta clasificar),
+  -- `placa` identifica el vehículo y `patrulla_id` apunta a su patrulla.
+  rol         TEXT,
+  placa       TEXT,
+  patrulla_id UUID,
+  CONSTRAINT chk_tecnicos_rol
+    CHECK (rol IS NULL OR rol IN ('operador', 'patrulla')),
+  CONSTRAINT fk_tecnicos_patrulla
+    FOREIGN KEY (patrulla_id) REFERENCES tecnicos (id) ON DELETE SET NULL,
+  CONSTRAINT chk_tecnicos_no_autopatrulla
+    CHECK (patrulla_id IS NULL OR patrulla_id <> id)
 );
 
 -- Reglas de asignación automática (matriz ciudad/barrio/servicio -> técnico)
@@ -92,6 +103,12 @@ CREATE INDEX IF NOT EXISTS idx_servicios_tecnico_id ON servicios (tecnico_id);
 
 -- Búsqueda en la matriz de asignación
 CREATE INDEX IF NOT EXISTS idx_reglas_busqueda ON reglas_asignacion (ciudad, barrio, tipo_servicio);
+
+-- Clasificación de células territoriales (operador / patrulla)
+CREATE INDEX IF NOT EXISTS idx_tecnicos_rol ON tecnicos (rol);
+
+-- Carga de una patrulla: operadores agrupados por `patrulla_id`
+CREATE INDEX IF NOT EXISTS idx_tecnicos_patrulla_id ON tecnicos (patrulla_id);
 
 -- ---------------------------------------------------------------------
 -- 4. POLÍTICAS DE SEGURIDAD (RLS - Row Level Security)

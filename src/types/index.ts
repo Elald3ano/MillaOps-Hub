@@ -1,10 +1,15 @@
 // Tipos de dominio para MillaOps Hub
 
+export type RolTecnico = 'patrulla' | 'operador'
+
 export interface Tecnico {
   id: string
   nombre: string
-  telefono?: string
   documento?: string
+  telefono?: string
+  placa?: string
+  rol?: RolTecnico | null
+  patrulla_id?: string | null
   activo: boolean
 }
 

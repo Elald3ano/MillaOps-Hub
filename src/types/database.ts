@@ -20,6 +20,9 @@ export type Database = {
           documento: string | null
           activo: boolean
           created_at: string
+          rol: string | null
+          placa: string | null
+          patrulla_id: string | null
         }
         Insert: {
           id?: string
@@ -28,6 +31,9 @@ export type Database = {
           documento?: string | null
           activo?: boolean
           created_at?: string
+          rol?: string | null
+          placa?: string | null
+          patrulla_id?: string | null
         }
         Update: {
           id?: string
@@ -36,6 +42,9 @@ export type Database = {
           documento?: string | null
           activo?: boolean
           created_at?: string
+          rol?: string | null
+          placa?: string | null
+          patrulla_id?: string | null
         }
         Relationships: []
       }

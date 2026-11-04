@@ -9,6 +9,7 @@ import type {
   NuevaRegla,
   ReglaAsignacion,
   ReglaConTecnico,
+  RolTecnico,
   Servicio,
   ServicioNuevo,
   Tecnico,
@@ -54,12 +55,20 @@ async function leerTodasLasFilas<T>(
   return { data: filas, error: null }
 }
 
+/** Normaliza el rol de célula; ignora valores fuera del dominio permitido. */
+function normalizarRol(valor: string | null): RolTecnico | null {
+  return valor === 'operador' || valor === 'patrulla' ? valor : null
+}
+
 function mapTecnico(row: TecnicoRow): Tecnico {
   return {
     id: row.id,
     nombre: row.nombre,
-    telefono: row.telefono ?? undefined,
     documento: row.documento ?? undefined,
+    telefono: row.telefono ?? undefined,
+    placa: row.placa ?? undefined,
+    rol: normalizarRol(row.rol),
+    patrulla_id: row.patrulla_id ?? null,
     activo: row.activo,
   }
 }
@@ -124,6 +133,9 @@ export interface NuevoTecnicoInput {
   nombre: string
   telefono?: string
   documento?: string
+  placa?: string
+  rol?: RolTecnico | null
+  patrulla_id?: string | null
 }
 
 /** Crea un técnico nuevo (activo) y devuelve el registro persistido. */
@@ -134,13 +146,69 @@ export async function crearTecnico(input: NuevoTecnicoInput): Promise<Tecnico> {
   }
   const telefono = input.telefono?.trim()
   const documento = input.documento?.trim()
+  const placa = input.placa?.trim()
   if (telefono) fila.telefono = telefono
   if (documento) fila.documento = documento
+  if (placa) fila.placa = placa
+  if (input.rol) fila.rol = input.rol
+  if (input.patrulla_id !== null && input.patrulla_id !== undefined) {
+    fila.patrulla_id = input.patrulla_id
+  }
 
   const { data, error } = await supabase.from('tecnicos').insert(fila).select('*').single()
 
   if (error) throw new Error(`Error al crear el técnico: ${error.message}`)
   if (!data) throw new Error('No se recibió confirmación al crear el técnico.')
+  return mapTecnico(data)
+}
+
+/** Actualiza la ficha técnica de un técnico (solo los campos enviados). */
+export async function actualizarTecnico(
+  tecnicoId: string,
+  cambios: Partial<Omit<NuevoTecnicoInput, 'nombre'>> & { nombre?: string },
+): Promise<Tecnico> {
+  const fila: Database['public']['Tables']['tecnicos']['Update'] = {}
+
+  // Un string vacío se persiste como NULL (limpieza explícita del campo).
+  const normalizarTexto = (valor: string): string | null => {
+    const limpio = valor.trim()
+    return limpio === '' ? null : limpio
+  }
+
+  if (cambios.nombre !== undefined) {
+    const nombre = cambios.nombre.trim()
+    if (nombre === '') throw new Error('El nombre del técnico no puede estar vacío.')
+    fila.nombre = nombre
+  }
+  if (cambios.telefono !== undefined) {
+    fila.telefono = normalizarTexto(cambios.telefono)
+  }
+  if (cambios.documento !== undefined) {
+    fila.documento = normalizarTexto(cambios.documento)
+  }
+  if (cambios.placa !== undefined) {
+    fila.placa = normalizarTexto(cambios.placa)
+  }
+  if (cambios.rol !== undefined) {
+    fila.rol = normalizarRol(cambios.rol)
+  }
+  if (cambios.patrulla_id !== undefined) {
+    fila.patrulla_id = cambios.patrulla_id
+  }
+
+  if (Object.keys(fila).length === 0) {
+    throw new Error('No se recibieron campos para actualizar el técnico.')
+  }
+
+  const { data, error } = await supabase
+    .from('tecnicos')
+    .update(fila)
+    .eq('id', tecnicoId)
+    .select('*')
+    .single()
+
+  if (error) throw new Error(`Error al actualizar el técnico: ${error.message}`)
+  if (!data) throw new Error('No se recibió confirmación al actualizar el técnico.')
   return mapTecnico(data)
 }
 
@@ -253,6 +321,10 @@ function esTecnicoValido(nombre: string): boolean {
 /**
  * Garantiza que existan técnicos con los nombres dados (inserta los que falten).
  * Devuelve cuántos se crearon y un mapa nombre → id.
+ *
+ * Los técnicos importados desde la matriz se insertan solo con `nombre` y
+ * `activo`; las columnas `rol`, `placa` y `patrulla_id` quedan en NULL y se
+ * clasifican después desde Gestión Territorial.
  */
 async function asegurarTecnicos(
   nombres: string[],

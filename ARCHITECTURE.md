@@ -23,17 +23,35 @@ incrementales en `supabase/migration_*.sql`.
 
 #### `tecnicos` — Técnicos disponibles para asignación
 
-| Columna      | Tipo        | Restricciones                          |
-|--------------|-------------|----------------------------------------|
-| `id`         | UUID        | PK, `gen_random_uuid()`                 |
-| `nombre`     | TEXT        | NOT NULL                                |
-| `telefono`   | TEXT        | nullable                                |
-| `documento`  | TEXT        | nullable                                |
-| `activo`     | BOOLEAN     | NOT NULL DEFAULT `TRUE`                 |
-| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT `now()`                |
+| Columna       | Tipo        | Restricciones                                              |
+|---------------|-------------|------------------------------------------------------------|
+| `id`          | UUID        | PK, `gen_random_uuid()`                                     |
+| `nombre`      | TEXT        | NOT NULL                                                    |
+| `telefono`    | TEXT        | nullable                                                    |
+| `documento`   | TEXT        | nullable (cédula del técnico; **no existe** campo `cedula`) |
+| `activo`      | BOOLEAN     | NOT NULL DEFAULT `TRUE`                                     |
+| `created_at`  | TIMESTAMPTZ | NOT NULL DEFAULT `now()`                                    |
+| `rol`         | TEXT        | nullable · CHECK `(rol IS NULL OR rol IN ('operador','patrulla'))` |
+| `placa`       | TEXT        | nullable                                                    |
+| `patrulla_id` | UUID        | nullable · FK → `tecnicos(id)` **ON DELETE SET NULL** · CHECK `patrulla_id <> id` |
 
-- Índice único `idx_tecnicos_nombre ON tecnicos (nombre)` (creado por el seed, garantiza que
-  `asegurarTecnicos` no duplique técnicos por nombre).
+**9 columnas vivas en total.** Índices: `idx_tecnicos_nombre` (único, creado por el seed, garantiza
+que `asegurarTecnicos` no duplique técnicos por nombre), `idx_tecnicos_rol` (clasificación de
+células) e `idx_tecnicos_patrulla_id` (carga por patrulla).
+
+#### Modelo de Células Territoriales
+
+Dos roles conviven en `tecnicos.rol`:
+
+- **`operador`** — titular de barrio: es el dueño general (P2, `tipo_servicio = NULL`). Sus reglas
+  en `reglas_asignacion` definen su territorio.
+- **`patrulla`** — solo supervisa: **no tiene reglas propias**. Su carga es la **unión de los
+  barrios de sus operadores**, resuelta vía `tecnicos.patrulla_id` (los operadores apuntan a la
+  patrulla con `patrulla_id`).
+
+Los **36 técnicos actuales** tienen `rol = NULL` (sin clasificar) hasta la Fase 2; el motor de
+asignación los sigue tratando como dueños generales según sus reglas existentes. `placa` y
+`patrulla_id` también están en NULL hasta esa clasificación.
 
 #### `reglas_asignacion` — Matriz de asignación (ciudad/barrio/servicio → técnico)
 
@@ -100,7 +118,7 @@ incrementales en `supabase/migration_*.sql`.
 #### `tecnicos_ciudades` — Ciudades activas por técnico (Gestión Territorial)
 
 `(tecnico_id, ciudad)` con `UNIQUE (tecnico_id, ciudad)` e índice por `tecnico_id`.
-⚠️ **Migración pendiente** (`supabase/migration_tecnicos_ciudades.sql`). `getCiudadesActivas()`
+✅ **Migración aplicada** (`supabase/migration_tecnicos_ciudades.sql`). `getCiudadesActivas()`
 la lee de forma defensiva: si la tabla no existe, devuelve `{}` y registra un `console.warn`.
 
 #### `auditorias_cierres` — Histórico multiusuario de Auditoría de Cierres
@@ -119,7 +137,7 @@ la lee de forma defensiva: si la tabla no existe, devuelve `{}` y registra un `c
 | `created_at`             | TIMESTAMPTZ | DEFAULT `now()`                                      |
 
 - Índice `idx_auditorias_fecha ON auditorias_cierres (created_at DESC)` para la última en O(1).
-- ⚠️ **Migración pendiente** (`supabase/migration_auditorias_cierres.sql`).
+- ✅ **Migración aplicada** (`supabase/migration_auditorias_cierres.sql`).
 - `guardarAuditoriaCierres()` / `getUltimaAuditoriaCierres()` hidratan la UI tras F5 y entre
   usuarios (persistencia multiusuario).
 
@@ -135,13 +153,15 @@ restricciones de fila por rol.
 |--------------------------------------|---------------|-------------------------------------------------------------|
 | `schema.sql`                         | base          | esquema + RLS + seed demo (idempotente)                     |
 | `seed_matriz_completa.sql`           | base          | 30 técnicos + reglas (idempotente, `ON CONFLICT DO NOTHING`)|
-| `migration_flotantes.sql`            | ⚠️ pendiente  | `idx_regla_especialidad_unica` (coexistencia P1/P2 a nivel DB) |
-| `migration_tecnicos_ciudades.sql`    | ⚠️ pendiente  | tabla `tecnicos_ciudades`                                    |
-| `migration_auditorias_cierres.sql`   | ⚠️ pendiente  | tabla `auditorias_cierres` (persistencia multiusuario)       |
-| `migration_toro_foronda.sql`         | ⚠️ pendiente  | cobertura Foronda en "Toro Valle" + "La Union Valle"         |
+| `migration_flotantes.sql`            | ⚠️ pendiente  | `idx_regla_especialidad_unica` (coexistencia P1/P2 a nivel DB); el índice no se pudo verificar por REST |
+| `migration_tecnicos_ciudades.sql`    | ✅ aplicada   | tabla `tecnicos_ciudades`                                    |
+| `migration_auditorias_cierres.sql`   | ✅ aplicada   | tabla `auditorias_cierres` (persistencia multiusuario)       |
+| `migration_toro_foronda.sql`         | ✅ aplicada   | cobertura Foronda en "Toro Valle" + "La Union Valle"         |
 | `migration_tecnico_documento.sql`    | redundante    | columna `documento` ya presente en `schema.sql`              |
 | `migration_sigma_fields.sql`         | redundante    | columnas de cliente ya presentes en `schema.sql`             |
-| `migration_regla_unica.sql`          | obsoleta      | índice `idx_regla_ciudad_barrio_unica` reemplazado por `migration_flotantes.sql` |
+
+Las columnas `documento`, `rol`, `placa` y `patrulla_id` de `tecnicos` **ya existen** en la base
+viva (verificado contra la tabla real), por lo que no requieren migración incremental.
 
 ---
 
@@ -392,7 +412,7 @@ supabase/
   schema.sql                           esquema base + RLS + seed demo
   seed_matriz_completa.sql             30 técnicos + reglas (idempotente)
   migration_flotantes.sql              ⚠️ pendiente: idx_regla_especialidad_unica (P1/P2)
-  migration_tecnicos_ciudades.sql      ⚠️ pendiente: tabla tecnicos_ciudades
-  migration_auditorias_cierres.sql     ⚠️ pendiente: tabla auditorias_cierres
-  migration_toro_foronda.sql           ⚠️ pendiente: cobertura Foronda (Toro Valle + La Union Valle)
+  migration_tecnicos_ciudades.sql      ✅ aplicada: tabla tecnicos_ciudades
+  migration_auditorias_cierres.sql     ✅ aplicada: tabla auditorias_cierres
+  migration_toro_foronda.sql           ✅ aplicada: cobertura Foronda (Toro Valle + La Union Valle)
 ```
