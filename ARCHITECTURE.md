@@ -333,10 +333,14 @@ cuando hay >1. Exporta planilla conjunta por grupos.
 
 ### 3.4 Exportación dual (PDF + captura HD)
 
-- **PDF 1-clic** — `generarPlanillaPdf(grupos, opciones)` (`pdfGenerator.ts`): planilla física por
-  técnico (grupos de la selección, órdenes ya filtradas por chips + umbral). REGLA DE ORO: ordena
-  por `dias_antiguedad` descendente. 7 columnas con `Firma Cliente` vacía. Carga **diferida** de
-  `jspdf` + `jspdf-autotable` (chunks separados).
+- **PDF 1-clic** — `generarPlanillaPdf(grupos, opciones)` (`pdfGenerator.ts`, único generador): planilla
+  física por técnico (grupos de la selección, órdenes ya filtradas por chips + umbral). **6 columnas**:
+  Días · Orden # · Ciudad · Barrio/Dirección · Cliente/Teléfono/Ref. Pago · Tipo de Servicio (sin la
+  antigua columna `Firma Cliente`). Carga **diferida** de `jspdf` + `jspdf-autotable` (chunks
+  separados). El pie de página conserva las firmas de Supervisor y Técnico.
+- **Orden de filas** — el modal consolidado (`PdfExportModal.tsx`) no envía `respetarOrden`, por lo
+  que aplica la **REGLA DE ORO** (SLA descendente por `dias_antiguedad`). La Radiografía
+  (`RadiografiaTecnico.tsx`) envía `respetarOrden: true` y conserva el orden de pantalla.
 - **Captura HD para WhatsApp** — `html-to-image` (`imageExporter.ts`): `capturarElementoComoImagen`
   a escala 2x (fondo navy), `copiarImagenAlPortapapeles` (ClipboardItem PNG) con fallback a
   `descargarBlob`. Reemplaza a `html2canvas` (incompatible con OKLCH de Tailwind v4).

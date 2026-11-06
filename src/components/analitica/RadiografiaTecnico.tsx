@@ -241,7 +241,8 @@ export function RadiografiaTecnico({
     )
   }
 
-  // Exportación en 1 clic: agrupa por técnico seleccionado y genera la planilla conjunta.
+  // Exportación en 1 clic: agrupa por técnico seleccionado y genera la planilla
+  // conjunta respetando el orden de la pantalla (respetarOrden: true).
   async function descargarPlanilla() {
     if (serviciosFiltrados.length === 0) {
       notificar('No hay órdenes para exportar.', 'error')
@@ -276,7 +277,7 @@ export function RadiografiaTecnico({
       const doc = await generarPlanillaPdf(grupos, {
         soloCriticas: false,
         ciudad: ciudadesTexto,
-        respetarOrden: false,
+        respetarOrden: true,
         notaFiltros,
       })
 

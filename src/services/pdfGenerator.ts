@@ -66,11 +66,11 @@ const COLOR_DETALLE: [number, number, number] = [51, 65, 85] // #334155 (slate-7
 const COLOR_VERDE: [number, number, number] = [22, 163, 74] // #16a34a (green-600)
 const COLOR_AMARILLO: [number, number, number] = [250, 204, 21] // #facc15 (yellow-400)
 
-// ---- Estilos compartidos de las tablas (planilla y vista táctica) ----
+// ---- Estilos compartidos de la planilla de despacho (6 columnas) ----
 // Ancho útil: 210 mm (A4) − 8 mm × 2 = 194 mm; los anchos de columna suman 194 mm.
 const ESTILOS_CUERPO: UserOptions['styles'] = {
   fontSize: 8.5,
-  cellPadding: 3,
+  cellPadding: 2.5,
   overflow: 'linebreak',
   valign: 'middle',
   lineColor: COLOR_BORDE,
@@ -85,14 +85,15 @@ const ESTILOS_HEAD: UserOptions['headStyles'] = {
   valign: 'middle',
 }
 
+// 6 columnas · 194 mm útiles (210 mm A4 − 8 mm × 2).
+// Barrio/Dirección es la más ancha para evitar saltos de línea excesivos.
 const ANCHOS_COLUMNAS: UserOptions['columnStyles'] = {
   0: { cellWidth: 13, halign: 'center', fontStyle: 'bold' },
   1: { cellWidth: 21, textColor: COLOR_TEXTO_OSCURO },
   2: { cellWidth: 24, fontStyle: 'bold' },
-  3: { cellWidth: 46 },
-  4: { cellWidth: 42 },
-  5: { cellWidth: 28 },
-  6: { cellWidth: 20, halign: 'center' },
+  3: { cellWidth: 54 },
+  4: { cellWidth: 52 },
+  5: { cellWidth: 30 },
 }
 
 const CABECERAS = [
@@ -102,7 +103,6 @@ const CABECERAS = [
   'Barrio / Dirección',
   'Cliente / Teléfono / Ref. Pago',
   'Tipo de Servicio',
-  'Firma Cliente',
 ]
 
 /** Une partes no vacías con " / " para celdas compuestas del PDF. */
@@ -291,7 +291,6 @@ function dibujarTabla(
         `Ref: ${s.referencia_pago || 'S/R'}`,
       ].join('\n'),
       s.tipo_servicio,
-      '', // espacio en blanco para la firma del cliente
     ]),
     margin: { left: MARGEN_TABLA, right: MARGEN_TABLA, bottom: 26 },
     rowPageBreak: 'avoid',
@@ -362,7 +361,7 @@ export async function generarPlanillaPdf(
 
   const gruposFiltrados = grupos
     .map((grupo) => {
-      // REGLA DE ORO (modal masivo): lo más crítico primero. La vista táctica
+      // REGLA DE ORO (modal masivo): lo más crítico primero. La Radiografía
       // envía `respetarOrden: true` para conservar el orden de pantalla.
       const ordenesFinales = (
         opciones.soloCriticas
