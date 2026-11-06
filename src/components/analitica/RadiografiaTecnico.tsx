@@ -24,6 +24,7 @@ import {
   descargarBlob,
 } from '../../lib/imageExporter'
 import { limpiarTexto } from '../../lib/normalizer'
+import { esServicioLiviano } from '../../lib/tiposServicio'
 import { cn } from '../../lib/utils'
 
 const ITEMS_POR_PAGINA = 30
@@ -100,12 +101,39 @@ export function RadiografiaTecnico({
     (tecnicos[0].id === 'sin_asignar' || tecnicos[0].nombre === 'Sin Asignar')
   const esMulti = tecnicos.length > 1
   const ciudadesTexto = [...new Set(servicios.map((s) => s.ciudad))].sort().join(', ') || 'Sin ciudad'
-  const nombreBase =
-    tecnicos.length === 1 ? tecnicos[0].nombre : `${tecnicos.length} técnicos seleccionados`
+
+  // Cabecera agregada cuando se selecciona exactamente una patrulla.
+  const patrullasSeleccionadas = tecnicos.filter((t) => t.rol === 'patrulla')
+  const patrullaSeleccionada =
+    patrullasSeleccionadas.length === 1 ? patrullasSeleccionadas[0] : null
+  const operadoresDePatrulla = patrullaSeleccionada
+    ? tecnicos.filter((t) => t.patrulla_id === patrullaSeleccionada.id)
+    : []
+
+  const nombreBase = patrullaSeleccionada
+    ? `Patrulla ${patrullaSeleccionada.nombre}`
+    : tecnicos.length === 1
+      ? tecnicos[0].nombre
+      : `${tecnicos.length} técnicos seleccionados`
 
   // Nombre del técnico por id (para la columna TÉCNICO en modo multicuadrilla).
   const nombrePorId = useMemo(
     () => new Map(tecnicos.map((t) => [t.id, t.nombre] as const)),
+    [tecnicos],
+  )
+
+  // Técnico por id y nombre de patrulla por id (para la anotación en la columna TÉCNICO).
+  const tecnicoPorId = useMemo(
+    () => new Map(tecnicos.map((t) => [t.id, t] as const)),
+    [tecnicos],
+  )
+  const patrullaNombrePorId = useMemo(
+    () =>
+      new Map(
+        tecnicos
+          .filter((t) => t.rol === 'patrulla')
+          .map((t) => [t.id, t.nombre] as const),
+      ),
     [tecnicos],
   )
 
@@ -224,8 +252,9 @@ export function RadiografiaTecnico({
       const { generarPlanillaPdf, slugificar, marcaDeTiempo } = await import(
         '../../services/pdfGenerator'
       )
-      // Agrupa las órdenes filtradas por técnico seleccionado ('sin_asignar' = huérfanas).
+      // Las patrullas solo agrupan: no tienen órdenes propias, se excluyen del PDF.
       const grupos = tecnicos
+        .filter((t) => t.rol !== 'patrulla')
         .map((t) => ({
           tecnico: t,
           servicios: serviciosFiltrados.filter((s) =>
@@ -235,7 +264,7 @@ export function RadiografiaTecnico({
         .filter((g) => g.servicios.length > 0)
 
       if (grupos.length === 0) {
-        notificar('No hay órdenes para exportar.', 'error')
+        notificar('No hay operadores con órdenes para exportar.', 'error')
         return
       }
 
@@ -251,8 +280,9 @@ export function RadiografiaTecnico({
         notaFiltros,
       })
 
-      const base =
-        grupos.length === 1
+      const base = patrullaSeleccionada
+        ? slugificar(nombreBase)
+        : grupos.length === 1
           ? slugificar(grupos[0].tecnico.nombre)
           : `consolidado-${grupos.length}-tecnicos`
       const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
@@ -277,8 +307,9 @@ export function RadiografiaTecnico({
   async function nombrePng(): Promise<string> {
     const { slugificar, marcaDeTiempo } = await import('../../services/pdfGenerator')
     const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
-    const base =
-      tecnicos.length === 1
+    const base = patrullaSeleccionada
+      ? slugificar(nombreBase)
+      : tecnicos.length === 1
         ? slugificar(tecnicos[0].nombre)
         : `consolidado-${tecnicos.length}-tecnicos`
     return `PD-${base}${sufijo}-${marcaDeTiempo()}.png`
@@ -341,12 +372,16 @@ export function RadiografiaTecnico({
           </span>
           <div className="min-w-0">
             <h3 className="flex flex-wrap items-center gap-2 text-base font-bold text-white">
-              <span className="truncate">
-                {esModoSinAsignar
-                  ? '⚠️ Órdenes Sin Asignar'
-                  : esMulti
-                    ? `👥 ${tecnicos.length} Técnicos Seleccionados (${ciudadesTexto})`
-                    : tecnicos[0].nombre}
+              <span className={patrullaSeleccionada ? 'break-words' : 'truncate'}>
+                {patrullaSeleccionada
+                  ? `Patrulla: ${patrullaSeleccionada.nombre} | Placa: ${
+                      patrullaSeleccionada.placa ?? 'Sin placa'
+                    } | Operadores: ${operadoresDePatrulla.length} | Total: ${total} órdenes`
+                  : esModoSinAsignar
+                    ? '⚠️ Órdenes Sin Asignar'
+                    : esMulti
+                      ? `👥 ${tecnicos.length} Técnicos Seleccionados (${ciudadesTexto})`
+                      : tecnicos[0].nombre}
               </span>
               <span
                 className={cn(
@@ -362,11 +397,13 @@ export function RadiografiaTecnico({
               </span>
             </h3>
             <p className="text-xs text-slate-400">
-              {esModoSinAsignar
-                ? 'Órdenes huérfanas que requieren asignación territorial'
-                : esMulti
-                  ? `Despacho táctico conjunto · ${total} órdenes totales`
-                  : 'Radiografía por zona del técnico'}
+              {patrullaSeleccionada
+                ? `Despacho agregado de la patrulla · ${total} órdenes`
+                : esModoSinAsignar
+                  ? 'Órdenes huérfanas que requieren asignación territorial'
+                  : esMulti
+                    ? `Despacho táctico conjunto · ${total} órdenes totales`
+                    : 'Radiografía por zona del técnico'}
             </p>
           </div>
         </div>
@@ -494,11 +531,13 @@ export function RadiografiaTecnico({
               MillaOps Hub · Radiografía de despacho
             </p>
             <p className="truncate text-base font-bold text-white">
-              {esModoSinAsignar
-                ? 'Órdenes Sin Asignar'
-                : esMulti
-                  ? `${tecnicos.length} Técnicos Seleccionados`
-                  : tecnicos[0].nombre}
+              {patrullaSeleccionada
+                ? `Patrulla ${patrullaSeleccionada.nombre}`
+                : esModoSinAsignar
+                  ? 'Órdenes Sin Asignar'
+                  : esMulti
+                    ? `${tecnicos.length} Técnicos Seleccionados`
+                    : tecnicos[0].nombre}
             </p>
             <p className="text-[11px] text-slate-400">
               {[...new Set(serviciosFiltrados.map((s) => s.ciudad))].sort().join(', ') ||
@@ -683,7 +722,17 @@ export function RadiografiaTecnico({
                                       Ref: {s.referencia_pago || 'S/R'}
                                     </p>
                                   </td>
-                                  <td className="px-3 py-1.5 text-slate-300">{s.tipo_servicio}</td>
+                                  <td className="px-3 py-1.5 text-slate-300">
+                                    {s.tipo_servicio}
+                                    {!esServicioLiviano(s.tipo_servicio) && (
+                                      <span
+                                        title="Requiere apoyo de patrulla (carro/escalera)"
+                                        className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold text-amber-300 ring-1 ring-amber-500/30"
+                                      >
+                                        🚛 Apoyo
+                                      </span>
+                                    )}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -730,7 +779,12 @@ export function RadiografiaTecnico({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {visibles.map((s) => (
+                  {visibles.map((s) => {
+                    const tecnico = s.tecnico_id ? tecnicoPorId.get(s.tecnico_id) : undefined
+                    const patrullaNombre = tecnico?.patrulla_id
+                      ? patrullaNombrePorId.get(tecnico.patrulla_id)
+                      : undefined
+                    return (
                     <tr key={s.id} className="align-top">
                       <td className="px-3 py-1.5 whitespace-nowrap">
                         <BadgeDias dias={s.dias_antiguedad} />
@@ -756,14 +810,32 @@ export function RadiografiaTecnico({
                           Ref: {s.referencia_pago || 'S/R'}
                         </p>
                       </td>
-                      <td className="px-3 py-1.5 text-slate-300">{s.tipo_servicio}</td>
+                      <td className="px-3 py-1.5 text-slate-300">
+                        {s.tipo_servicio}
+                        {!esServicioLiviano(s.tipo_servicio) && (
+                          <span
+                            title="Requiere apoyo de patrulla (carro/escalera)"
+                            className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold text-amber-300 ring-1 ring-amber-500/30"
+                          >
+                            🚛 Apoyo
+                          </span>
+                        )}
+                      </td>
                       {esMulti && (
                         <td className="px-3 py-1.5 whitespace-nowrap text-slate-300">
-                          {s.tecnico_id ? (nombrePorId.get(s.tecnico_id) ?? '—') : 'Sin Asignar'}
+                          <span className="block">
+                            {s.tecnico_id ? (nombrePorId.get(s.tecnico_id) ?? '—') : 'Sin Asignar'}
+                          </span>
+                          {tecnico?.patrulla_id && (
+                            <span className="block text-[10px] text-slate-500">
+                              (patrulla{patrullaNombre ? `: ${patrullaNombre}` : ''})
+                            </span>
+                          )}
                         </td>
                       )}
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

@@ -3,11 +3,13 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Bike,
   Building2,
   Check,
   ChevronDown,
   ChevronRight,
   MapPin,
+  Truck,
   Users,
 } from 'lucide-react'
 import type { Servicio, Tecnico } from '../../types'
@@ -44,6 +46,17 @@ interface TecnicoEnCiudad {
   livianos: number
   pesados: number
   carga: Carga
+  /** Nombre de la patrulla cuando el operador queda como independiente en esta ciudad. */
+  patrullaNombre?: string
+}
+
+interface PatrullaEnCiudad {
+  patrulla: Tecnico
+  operadores: TecnicoEnCiudad[]
+  total: number
+  livianos: number
+  pesados: number
+  carga: Carga
 }
 
 interface ResumenCiudad {
@@ -52,6 +65,8 @@ interface ResumenCiudad {
   total: number
   sinAsignar: number
   tecnicos: TecnicoEnCiudad[]
+  patrullas: PatrullaEnCiudad[]
+  independientes: TecnicoEnCiudad[]
 }
 
 function clasificarCarga(total: number): Carga {
@@ -76,6 +91,64 @@ function formatearCiudades(deOrdenes: Set<string>, asignadas: string[] | undefin
   return unicas.sort((a, b) => a.localeCompare(b)).join(', ')
 }
 
+/** Fila seleccionable de un técnico dentro de una ciudad. */
+function FilaTecnico({
+  item,
+  seleccionado,
+  onToggle,
+}: {
+  item: TecnicoEnCiudad
+  seleccionado: boolean
+  onToggle: () => void
+}) {
+  const cfg = CARGA_CONFIG[item.carga]
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={seleccionado}
+      className={cn(
+        'w-full rounded-lg px-2.5 py-2 text-left transition-all',
+        seleccionado
+          ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
+          : 'cursor-pointer hover:bg-slate-800/60',
+      )}
+    >
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className={cn(
+              'flex size-4 shrink-0 items-center justify-center rounded border transition',
+              seleccionado ? 'border-cyan-400 bg-cyan-600' : 'border-slate-600 bg-slate-950',
+            )}
+          >
+            {seleccionado && <Check className="size-3 text-white" strokeWidth={3} />}
+          </span>
+          <span className="truncate text-sm font-medium text-slate-200">{item.nombre}</span>
+          {item.patrullaNombre && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white/5 px-1.5 py-0.5 text-[10px] text-slate-400 ring-1 ring-white/10"
+              title={`Patrulla: ${item.patrullaNombre}`}
+            >
+              <Truck className="size-2.5" /> {item.patrullaNombre}
+            </span>
+          )}
+          {item.carga === 'saturado' && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold text-red-300 ring-1 ring-red-500/30">
+              <AlertTriangle className="size-3" /> Sobrecargado
+            </span>
+          )}
+        </div>
+        <span className={cn('text-sm font-bold tabular-nums', cfg.texto)}>{item.total}</span>
+      </div>
+      <BarraProgreso valor={item.total / REF_SATURACION} color={cfg.barra} />
+      <p className="mt-1 text-[11px] text-slate-400">
+        {item.livianos} liviano · {item.pesados} pesado
+      </p>
+    </button>
+  )
+}
+
 interface BalanceCuadrillasProps {
   servicios: Servicio[]
   tecnicos: Tecnico[]
@@ -83,6 +156,7 @@ interface BalanceCuadrillasProps {
   tecnicosSeleccionadosIds: string[]
   sinAsignarCiudadSeleccionada: string | null
   onToggleTecnico: (id: string) => void
+  onTogglePatrulla: (id: string) => void
   onSeleccionarSinAsignarCiudad: (ciudad: string) => void
   onSeleccionarTodosDeCiudad: (ciudad: string) => void
   onDeseleccionarTodosDeCiudad: (ciudad: string) => void
@@ -97,6 +171,7 @@ export function BalanceCuadrillas({
   tecnicosSeleccionadosIds,
   sinAsignarCiudadSeleccionada,
   onToggleTecnico,
+  onTogglePatrulla,
   onSeleccionarSinAsignarCiudad,
   onSeleccionarTodosDeCiudad,
   onDeseleccionarTodosDeCiudad,
@@ -159,15 +234,86 @@ export function BalanceCuadrillas({
     }
 
     return [...porCiudad.values()]
-      .map((c) => ({
-        clave: limpiarTexto(c.ciudad),
-        ciudad: c.ciudad,
-        total: c.total,
-        sinAsignar: c.sinAsignar,
-        tecnicos: [...c.porTecnico.values()]
+      .map((c) => {
+        const tecnicosCiudad = [...c.porTecnico.values()]
           .map((t) => ({ ...t, carga: clasificarCarga(t.total) }))
-          .sort((a, b) => (a.total - b.total) * factor),
-      }))
+          .sort((a, b) => (a.total - b.total) * factor)
+
+        const operadoresDePatrulla = new Map<string, TecnicoEnCiudad[]>()
+        const ordenesPropiasDePatrulla = new Map<string, TecnicoEnCiudad>()
+        const patrullasConPresencia = new Set<string>()
+        const independientes: TecnicoEnCiudad[] = []
+
+        for (const item of tecnicosCiudad) {
+          const tecnico = tecnicosPorId.get(item.tecnicoId)
+          if (tecnico?.rol === 'patrulla') {
+            // Una patrulla puede aparecer con órdenes propias (caso excepcional).
+            // Se registran para que el total de la fila reconcilie con la ciudad.
+            ordenesPropiasDePatrulla.set(tecnico.id, item)
+            patrullasConPresencia.add(tecnico.id)
+            continue
+          }
+
+          const patrullaId = tecnico?.patrulla_id ?? null
+          if (patrullaId) {
+            const patrulla = tecnicosPorId.get(patrullaId)
+            if (patrulla?.rol === 'patrulla') {
+              const lista = operadoresDePatrulla.get(patrullaId) ?? []
+              lista.push(item)
+              operadoresDePatrulla.set(patrullaId, lista)
+              patrullasConPresencia.add(patrullaId)
+              continue
+            }
+            // Patrulla inexistente o no válida: se muestra como independiente.
+            independientes.push({
+              ...item,
+              patrullaNombre: patrulla?.nombre ?? `Patrulla ${patrullaId}`,
+            })
+            continue
+          }
+
+          // Sin patrulla o sin rol (null): operador independiente.
+          independientes.push(item)
+        }
+
+        const patrullas: PatrullaEnCiudad[] = [...patrullasConPresencia]
+          .map((patrullaId) => {
+            const patrulla = tecnicosPorId.get(patrullaId)
+            if (!patrulla) return null
+            const operadores = (operadoresDePatrulla.get(patrullaId) ?? []).sort(
+              (a, b) => (a.total - b.total) * factor,
+            )
+            // Órdenes propias de la patrulla (si las tuviera) también suman.
+            const propias = ordenesPropiasDePatrulla.get(patrullaId)
+            const total = operadores.reduce((acc, o) => acc + o.total, 0) + (propias?.total ?? 0)
+            const livianos =
+              operadores.reduce((acc, o) => acc + o.livianos, 0) + (propias?.livianos ?? 0)
+            const pesados =
+              operadores.reduce((acc, o) => acc + o.pesados, 0) + (propias?.pesados ?? 0)
+            return {
+              patrulla,
+              operadores,
+              total,
+              livianos,
+              pesados,
+              carga: clasificarCarga(total),
+            }
+          })
+          .filter((p): p is PatrullaEnCiudad => p !== null)
+          .sort((a, b) => (a.total - b.total) * factor)
+
+        independientes.sort((a, b) => (a.total - b.total) * factor)
+
+        return {
+          clave: limpiarTexto(c.ciudad),
+          ciudad: c.ciudad,
+          total: c.total,
+          sinAsignar: c.sinAsignar,
+          tecnicos: tecnicosCiudad,
+          patrullas,
+          independientes,
+        }
+      })
       .sort((a, b) => (a.total - b.total) * factor)
   }, [servicios, tecnicosPorId, direccionOrden])
 
@@ -221,9 +367,20 @@ export function BalanceCuadrillas({
 
   // Todas las ciudades comienzan colapsadas por defecto.
   const [sucursalExpandida, setSucursalExpandida] = useState<string | null>(null)
+  // Patrullas desplegadas (por id), independientes por ciudad.
+  const [patrullasExpandidas, setPatrullasExpandidas] = useState<Set<string>>(new Set())
 
   function toggleSucursal(clave: string) {
     setSucursalExpandida((prev) => (prev === clave ? null : clave))
+  }
+
+  function togglePatrullaExpandida(id: string) {
+    setPatrullasExpandidas((prev) => {
+      const siguiente = new Set(prev)
+      if (siguiente.has(id)) siguiente.delete(id)
+      else siguiente.add(id)
+      return siguiente
+    })
   }
 
   return (
@@ -384,59 +541,153 @@ export function BalanceCuadrillas({
                                 Desmarcar
                               </button>
                             </div>
-                            <ul className="space-y-1">
-                              {c.tecnicos.map((t) => {
-                                const cfg = CARGA_CONFIG[t.carga]
-                                const seleccionado = tecnicosSeleccionadosIds.includes(t.tecnicoId)
-                                return (
-                                  <li key={t.tecnicoId}>
-                                    <button
-                                      type="button"
-                                      onClick={() => onToggleTecnico(t.tecnicoId)}
-                                      aria-pressed={seleccionado}
-                                      className={cn(
-                                        'w-full rounded-lg px-2.5 py-2 text-left transition-all',
-                                        seleccionado
-                                          ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
-                                          : 'cursor-pointer hover:bg-slate-800/60',
-                                      )}
-                                    >
-                                      <div className="mb-1 flex items-center justify-between gap-2">
-                                        <div className="flex min-w-0 items-center gap-2">
-                                          <span
-                                            className={cn(
-                                              'flex size-4 shrink-0 items-center justify-center rounded border transition',
-                                              seleccionado
-                                                ? 'border-cyan-400 bg-cyan-600'
-                                                : 'border-slate-600 bg-slate-950',
-                                            )}
-                                          >
-                                            {seleccionado && (
-                                              <Check className="size-3 text-white" strokeWidth={3} />
-                                            )}
-                                          </span>
-                                          <span className="truncate text-sm font-medium text-slate-200">
-                                            {t.nombre}
-                                          </span>
-                                          {t.carga === 'saturado' && (
-                                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold text-red-300 ring-1 ring-red-500/30">
-                                              <AlertTriangle className="size-3" /> Sobrecargado
-                                            </span>
+
+                            {/* Árbol jerárquico: patrullas → operadores, luego independientes. */}
+                            {c.patrullas.length > 0 && (
+                              <div className="mb-2">
+                                <p className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-slate-400 uppercase">
+                                  <Truck className="size-3.5 text-cyan-300" /> Patrullas de Zona
+                                </p>
+                                <ul className="space-y-1">
+                                  {c.patrullas.map((p) => {
+                                    const cfg = CARGA_CONFIG[p.carga]
+                                    const seleccionada = tecnicosSeleccionadosIds.includes(
+                                      p.patrulla.id,
+                                    )
+                                    const desplegada = patrullasExpandidas.has(p.patrulla.id)
+                                    return (
+                                      <li key={p.patrulla.id}>
+                                        <div
+                                          className={cn(
+                                            'rounded-lg px-2.5 py-2 transition-all',
+                                            seleccionada
+                                              ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
+                                              : 'hover:bg-slate-800/60',
+                                          )}
+                                        >
+                                          <div className="flex items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => onTogglePatrulla(p.patrulla.id)}
+                                              aria-pressed={seleccionada}
+                                              aria-label={`Seleccionar patrulla ${p.patrulla.nombre}`}
+                                              className="shrink-0 cursor-pointer rounded p-0.5 transition hover:bg-white/10"
+                                            >
+                                              <span
+                                                className={cn(
+                                                  'flex size-4 shrink-0 items-center justify-center rounded border transition',
+                                                  seleccionada
+                                                    ? 'border-cyan-400 bg-cyan-600'
+                                                    : 'border-slate-600 bg-slate-950',
+                                                )}
+                                              >
+                                                {seleccionada && (
+                                                  <Check
+                                                    className="size-3 text-white"
+                                                    strokeWidth={3}
+                                                  />
+                                                )}
+                                              </span>
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => togglePatrullaExpandida(p.patrulla.id)}
+                                              aria-expanded={desplegada}
+                                              className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 text-left"
+                                            >
+                                              <span className="flex min-w-0 items-center gap-1.5">
+                                                {desplegada ? (
+                                                  <ChevronDown className="size-3.5 shrink-0 text-slate-400" />
+                                                ) : (
+                                                  <ChevronRight className="size-3.5 shrink-0 text-slate-400" />
+                                                )}
+                                                <Truck className="size-3.5 shrink-0 text-cyan-300" />
+                                                <span className="truncate text-sm font-medium text-slate-200">
+                                                  {p.patrulla.nombre}
+                                                </span>
+                                                <span className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-slate-300 ring-1 ring-white/15">
+                                                  {p.operadores.length}{' '}
+                                                  {p.operadores.length === 1
+                                                    ? 'operador'
+                                                    : 'operadores'}
+                                                </span>
+                                              </span>
+                                              <span
+                                                className={cn(
+                                                  'shrink-0 text-sm font-bold tabular-nums',
+                                                  cfg.texto,
+                                                )}
+                                              >
+                                                {p.total}
+                                              </span>
+                                            </button>
+                                          </div>
+                                          <div className="mt-1 pl-6">
+                                            <BarraProgreso
+                                              valor={p.total / REF_SATURACION}
+                                              color={cfg.barra}
+                                            />
+                                            <p className="mt-1 text-[11px] text-slate-400">
+                                              {p.livianos} liviano · {p.pesados} pesado
+                                            </p>
+                                          </div>
+
+                                          {desplegada && (
+                                            <ul className="mt-1 ml-4 space-y-1 border-l border-white/10 pl-2">
+                                              {p.operadores.length === 0 ? (
+                                                <li className="px-2.5 py-1 text-[11px] text-slate-500">
+                                                  Sin operadores con órdenes en esta ciudad.
+                                                </li>
+                                              ) : (
+                                                p.operadores.map((t) => (
+                                                  <li key={t.tecnicoId}>
+                                                    <FilaTecnico
+                                                      item={t}
+                                                      seleccionado={tecnicosSeleccionadosIds.includes(
+                                                        t.tecnicoId,
+                                                      )}
+                                                      onToggle={() => onToggleTecnico(t.tecnicoId)}
+                                                    />
+                                                  </li>
+                                                ))
+                                              )}
+                                            </ul>
                                           )}
                                         </div>
-                                        <span className={cn('text-sm font-bold tabular-nums', cfg.texto)}>
-                                          {t.total}
-                                        </span>
-                                      </div>
-                                      <BarraProgreso valor={t.total / REF_SATURACION} color={cfg.barra} />
-                                      <p className="mt-1 text-[11px] text-slate-400">
-                                        {t.livianos} liviano · {t.pesados} pesado
-                                      </p>
-                                    </button>
-                                  </li>
-                                )
-                              })}
-                            </ul>
+                                      </li>
+                                    )
+                                  })}
+                                </ul>
+                              </div>
+                            )}
+
+                            {c.independientes.length > 0 && (
+                              <div>
+                                <p className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-slate-400 uppercase">
+                                  <Bike className="size-3.5 text-cyan-300" /> Operadores
+                                  Independientes
+                                </p>
+                                <ul className="space-y-1">
+                                  {c.independientes.map((t) => (
+                                    <li key={t.tecnicoId}>
+                                      <FilaTecnico
+                                        item={t}
+                                        seleccionado={tecnicosSeleccionadosIds.includes(
+                                          t.tecnicoId,
+                                        )}
+                                        onToggle={() => onToggleTecnico(t.tecnicoId)}
+                                      />
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {c.patrullas.length === 0 && c.independientes.length === 0 && (
+                              <p className="px-2.5 py-2 text-xs text-slate-500">
+                                Sin técnicos con órdenes en esta ciudad.
+                              </p>
+                            )}
                           </>
                         )}
                       </div>
@@ -519,6 +770,16 @@ export function BalanceCuadrillas({
                           <span className="truncate text-sm font-medium text-slate-200">
                             {r.tecnico.nombre}
                           </span>
+                          {r.tecnico.rol === 'patrulla' && (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-200 ring-1 ring-cyan-500/30">
+                              🚛 Patrulla
+                            </span>
+                          )}
+                          {r.tecnico.rol === 'operador' && (
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-200 ring-1 ring-emerald-500/30">
+                              🛵 Operador
+                            </span>
+                          )}
                           {r.carga === 'saturado' && (
                             <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold text-red-300 ring-1 ring-red-500/30">
                               <AlertTriangle className="size-3" /> Sobrecargado

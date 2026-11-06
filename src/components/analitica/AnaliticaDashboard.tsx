@@ -110,6 +110,22 @@ export function AnaliticaDashboard({
     )
   }
 
+  // Selecciona/deselecciona una patrulla junto con todos sus operadores.
+  const togglePatrulla = (patrullaId: string) => {
+    setBarrioExpandido(null)
+    const operadoresIds = tecnicos
+      .filter((t) => t.patrulla_id === patrullaId)
+      .map((t) => t.id)
+    setTecnicosSeleccionadosIds((prev) => {
+      const algunoSeleccionado = operadoresIds.some((id) => prev.includes(id))
+      if (algunoSeleccionado) {
+        const aExcluir = new Set([patrullaId, ...operadoresIds])
+        return prev.filter((id) => !aExcluir.has(id))
+      }
+      return [...new Set([...prev, patrullaId, ...operadoresIds])]
+    })
+  }
+
   // Sin Asignar de una sucursal específica (selección aislada con alcance de ciudad).
   const seleccionarSinAsignarCiudad = (ciudad: string) => {
     setBarrioExpandido(null)
@@ -204,6 +220,7 @@ export function AnaliticaDashboard({
             tecnicosSeleccionadosIds={tecnicosSeleccionadosIds}
             sinAsignarCiudadSeleccionada={sinAsignarCiudad}
             onToggleTecnico={toggleTecnico}
+            onTogglePatrulla={togglePatrulla}
             onSeleccionarSinAsignarCiudad={seleccionarSinAsignarCiudad}
             onSeleccionarTodosDeCiudad={seleccionarTodosDeCiudad}
             onDeseleccionarTodosDeCiudad={deseleccionarTodosDeCiudad}
