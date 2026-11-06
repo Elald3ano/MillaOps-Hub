@@ -24,6 +24,7 @@ import {
   desvincularOperadoresDePatrulla,
   guardarCiudadesActivasTecnico,
 } from '../../services/supabaseService'
+import { barriosSemilla } from '../../lib/catalogoBarrios'
 import { limpiarBarrio, limpiarPrefijoNodo, limpiarTexto } from '../../lib/normalizer'
 import { TIPOS_SERVICIO_OFICIALES, TOTAL_TIPOS_SERVICIO } from '../../lib/tiposServicio'
 import { ciudadCanonica } from '../../lib/zonasPermitidas'
@@ -218,7 +219,8 @@ export function DetalleTecnicoTerritorio({
   )
 
 
-  // Todas las ciudades conocidas (reglas + servicios), en forma canónica.
+  // Todas las ciudades conocidas (reglas + servicios + ciudades activas del
+  // técnico), en forma canónica.
   const todasLasCiudades = useMemo(() => {
     const set = new Set<string>()
     const agregar = (ciudad: string) => {
@@ -227,8 +229,9 @@ export function DetalleTecnicoTerritorio({
     }
     for (const r of reglas) agregar(r.ciudad)
     for (const s of servicios) agregar(s.ciudad)
+    for (const c of ciudadesActivas) agregar(c)
     return [...set].sort((a, b) => a.localeCompare(b))
-  }, [reglas, servicios])
+  }, [reglas, servicios, ciudadesActivas])
 
   // Barrios por ciudad: Map<limpiarTexto(ciudad), Map<limpiarBarrio(barrio), nombreLegible>>.
   // La clave canónica `limpiarBarrio` fusiona variantes de nodo comercial
@@ -253,8 +256,22 @@ export function DetalleTecnicoTerritorio({
     for (const s of servicios) {
       agregar(s.ciudad, s.barrio)
     }
+    // Cold start: barrios oficiales de la ciudad aunque no haya datos aún.
+    for (const ciudad of todasLasCiudades) {
+      const canonica = ciudadCanonica(ciudad)
+      const ck = limpiarTexto(canonica)
+      if (!ck) continue
+      let inner = mapa.get(ck)
+      if (!inner) {
+        inner = new Map<string, string>()
+        mapa.set(ck, inner)
+      }
+      for (const { clave, nombre } of barriosSemilla(canonica)) {
+        if (clave && !inner.has(clave)) inner.set(clave, nombre)
+      }
+    }
     return mapa
-  }, [reglas, servicios])
+  }, [reglas, servicios, todasLasCiudades])
 
   // Dueño general actual por barrio (reglas P2 de OTROS técnicos), para avisar.
   const duenoGeneralAjeno = useMemo(() => {

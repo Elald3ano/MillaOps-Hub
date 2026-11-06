@@ -10,6 +10,7 @@ export const SUCURSALES_AUTORIZADAS = [
   'Todos los Santos',
   'Sonso',
   'Santander de Quilichao',
+  'Roldanillo',
   'Puerto Tejada',
   'Presidente Valle',
   'Palmira',
