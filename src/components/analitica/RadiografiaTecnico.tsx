@@ -870,7 +870,8 @@ export function RadiografiaTecnico({
                                     <p className="font-semibold text-slate-100">
                                       {s.nombre_cliente || 'SIN NOMBRE'}
                                     </p>
-                                    <p className="text-[10px] text-slate-500">
+                                    <p className="text-[10px] text-slate-500 whitespace-nowrap">
+                                      {s.telefono_cliente ? `Tel: ${s.telefono_cliente} · ` : ''}
                                       {`Ref: ${s.referencia_pago || 'S/R'}${
                                         s.identificacion ? ` · CC: ${s.identificacion}` : ''
                                       }`}
@@ -960,7 +961,8 @@ export function RadiografiaTecnico({
                         <p className="font-semibold text-slate-100">
                           {s.nombre_cliente || 'SIN NOMBRE'}
                         </p>
-                        <p className="text-[10px] text-slate-500">
+                        <p className="text-[10px] text-slate-500 whitespace-nowrap">
+                          {s.telefono_cliente ? `Tel: ${s.telefono_cliente} · ` : ''}
                           {`Ref: ${s.referencia_pago || 'S/R'}${
                             s.identificacion ? ` · CC: ${s.identificacion}` : ''
                           }`}
