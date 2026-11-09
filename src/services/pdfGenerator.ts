@@ -195,6 +195,8 @@ function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: Opcione
 function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   const F_NOMBRE = 8.5
   const F_DETALLE = 8
+  const F_DETALLE_MIN = 6.5
+  const PASO_REDUCCION = 0.5
   const FACTOR_LINEA = 1.15 // coincide con jspdf-autotable (PHYSICAL_LINE_HEIGHT)
   const aMm = (pt: number) => (pt * 25.4) / 72
 
@@ -207,19 +209,54 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   const tope = cell.y + padTop + Math.max(0, (disponible - altoTotal) / 2)
 
   const x = cell.x + cell.padding('left')
+  // Ancho real disponible para el texto dentro de la celda (sin paddings).
+  const anchoUtil = cell.width - cell.padding('left') - cell.padding('right')
   let base = tope + aMm(F_NOMBRE) * (2 - FACTOR_LINEA) // ajuste de línea base de autotable
 
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(F_NOMBRE)
   doc.setTextColor(...COLOR_NAVY)
-  doc.text(lineas[0] ?? '', x, base)
+  let nombre = lineas[0] ?? ''
+  // El nombre también se protege: si no cabe en negrita 8.5, se trunca.
+  if (doc.getTextWidth(nombre) > anchoUtil) {
+    const ELLIPSIS = '…'
+    while (nombre.length > 0 && doc.getTextWidth(nombre + ELLIPSIS) > anchoUtil) {
+      nombre = nombre.slice(0, -1)
+    }
+    nombre = nombre.length > 0 ? `${nombre}${ELLIPSIS}` : ''
+  }
+  doc.text(nombre, x, base)
   base += altoNombre
 
   doc.setFont('helvetica', 'normal')
-  doc.setFontSize(F_DETALLE)
   doc.setTextColor(...COLOR_DETALLE)
   for (let i = 1; i < lineas.length; i++) {
-    doc.text(lineas[i] ?? '', x, base)
+    let texto = lineas[i] ?? ''
+    let tamano = F_DETALLE
+    doc.setFontSize(tamano)
+
+    // Reduce progresivamente la tipografía del detalle hasta que quepa.
+    while (tamano > F_DETALLE_MIN && doc.getTextWidth(texto) > anchoUtil) {
+      tamano = Math.max(F_DETALLE_MIN, tamano - PASO_REDUCCION)
+      doc.setFontSize(tamano)
+    }
+
+    // Si aún no cabe al tamaño mínimo, trunca con puntos suspensivos.
+    if (doc.getTextWidth(texto) > anchoUtil) {
+      const ELLIPSIS = '…'
+      while (texto.length > 0 && doc.getTextWidth(texto + ELLIPSIS) > anchoUtil) {
+        texto = texto.slice(0, -1)
+      }
+      texto =
+        texto.length > 0
+          ? `${texto}${ELLIPSIS}`
+          : doc.getTextWidth(ELLIPSIS) <= anchoUtil
+            ? ELLIPSIS
+            : ''
+    }
+
+    doc.text(texto, x, base)
+    doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente línea
     base += altoDetalle
   }
 }
@@ -287,8 +324,9 @@ function dibujarTabla(
       unir(s.barrio, s.direccion),
       [
         s.nombre_cliente || 'SIN NOMBRE',
-        `Tel: ${s.telefono_cliente || 'S/T'}`,
-        `Ref: ${s.referencia_pago || 'S/R'}`,
+        `Tel: ${s.telefono_cliente || 'S/T'} · Ref: ${s.referencia_pago || 'S/R'}${
+          s.identificacion ? ` · CC: ${s.identificacion}` : ''
+        }`,
       ].join('\n'),
       s.tipo_servicio,
     ]),

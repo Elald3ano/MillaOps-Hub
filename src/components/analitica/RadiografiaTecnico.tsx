@@ -12,6 +12,7 @@ import {
   List,
   Loader2,
   MapPin,
+  Search,
   User,
   X,
 } from 'lucide-react'
@@ -23,20 +24,24 @@ import {
   copiarImagenAlPortapapeles,
   descargarBlob,
 } from '../../lib/imageExporter'
-import { limpiarTexto } from '../../lib/normalizer'
+import { limpiarBarrio, limpiarTexto } from '../../lib/normalizer'
 import { esServicioLiviano } from '../../lib/tiposServicio'
 import { cn } from '../../lib/utils'
 
 const ITEMS_POR_PAGINA = 30
 
-/** Opciones rápidas del selector de umbral; `null` = sin filtro de días. */
-const UMBRALES_RAPIDOS: { valor: number | null; etiqueta: string }[] = [
-  { valor: null, etiqueta: 'Todas las órdenes' },
-  { valor: 2, etiqueta: '≥ 2 días (Con retraso)' },
-  { valor: 3, etiqueta: '≥ 3 días (Críticas)' },
-  { valor: 5, etiqueta: '≥ 5 días (Muy críticas)' },
-  { valor: 7, etiqueta: '≥ 7 días (Severas)' },
-]
+/** Filtro de antigüedad por días: todas, un día exacto o un mínimo acumulado. */
+type FiltroDias =
+  | { tipo: 'todas' }
+  | { tipo: 'exacto'; dias: number }
+  | { tipo: 'minimo'; dias: number }
+
+/** Sufijo del nombre de archivo según el filtro de días activo. */
+function sufijoFiltroDias(filtro: FiltroDias): string {
+  if (filtro.tipo === 'exacto') return `-dia-${filtro.dias}`
+  if (filtro.tipo === 'minimo') return `-mas-${filtro.dias}dias`
+  return ''
+}
 
 type ColumnaOrden = 'dias' | 'orden' | 'ciudad' | 'barrio' | 'cliente' | 'servicio'
 type ModoVista = 'barrios' | 'lista'
@@ -78,8 +83,11 @@ export function RadiografiaTecnico({
   const [orden, setOrden] = useState<OrdenState>({ columna: 'dias', direccion: 'desc' })
   const [pagina, setPagina] = useState(1)
   const [generandoPdf, setGenerandoPdf] = useState(false)
-  // `null` = todas las edades; número = filtrar órdenes con `dias_antiguedad >= umbralDias`.
-  const [umbralDias, setUmbralDias] = useState<number | null>(null)
+  // Filtros tácticos: buscador libre, barrio y antigüedad en días.
+  const [busqueda, setBusqueda] = useState('')
+  const [barrioFiltro, setBarrioFiltro] = useState<string>('')
+  const [filtroDias, setFiltroDias] = useState<FiltroDias>({ tipo: 'todas' })
+  const [personalizado, setPersonalizado] = useState(false)
   const [umbralBorrador, setUmbralBorrador] = useState('')
   const [capturando, setCapturando] = useState(false)
   // Marca de tiempo estable por montaje: evita `new Date()` durante el render.
@@ -149,15 +157,65 @@ export function RadiografiaTecnico({
     return [...porTipo.values()].sort((a, b) => b.cantidad - a.cantidad)
   }, [servicios])
 
-  // Órdenes que cumplen los filtros activos: umbral dinámico de días + chips de servicio.
+  // Barrios disponibles (sobre el total del técnico, no sobre los filtrados,
+  // para que la lista del selector nunca se vacíe). Clave normalizada → etiqueta.
+  const barriosDisponibles = useMemo(() => {
+    const porClave = new Map<string, string>()
+    for (const s of servicios) {
+      const clave = limpiarBarrio(s.barrio)
+      if (!clave) continue
+      if (!porClave.has(clave)) porClave.set(clave, s.barrio || 'Sin barrio')
+    }
+    return [...porClave.entries()]
+      .map(([clave, etiqueta]) => ({ clave, etiqueta }))
+      .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta))
+  }, [servicios])
+
+  // Órdenes que cumplen TODOS los filtros activos: días, chips, barrio y buscador.
   const serviciosFiltrados = useMemo(() => {
-    const set = new Set(serviciosFiltro)
+    const setServicios = new Set(serviciosFiltro)
+    const q = limpiarTexto(busqueda)
     return servicios.filter((s) => {
-      if (umbralDias !== null && s.dias_antiguedad < umbralDias) return false
-      if (set.size > 0 && !set.has(limpiarTexto(s.tipo_servicio))) return false
+      // Días
+      if (filtroDias.tipo === 'exacto' && s.dias_antiguedad !== filtroDias.dias) return false
+      if (filtroDias.tipo === 'minimo' && s.dias_antiguedad < filtroDias.dias) return false
+      // Servicio (chips)
+      if (setServicios.size > 0 && !setServicios.has(limpiarTexto(s.tipo_servicio))) return false
+      // Barrio
+      if (barrioFiltro && limpiarBarrio(s.barrio) !== barrioFiltro) return false
+      // Buscador: nombre, CC (identificacion) y Ref
+      if (q) {
+        const campos = [s.nombre_cliente, s.identificacion, s.referencia_pago]
+        if (!campos.some((c) => limpiarTexto(c ?? '').includes(q))) return false
+      }
       return true
     })
-  }, [servicios, serviciosFiltro, umbralDias])
+  }, [servicios, serviciosFiltro, filtroDias, barrioFiltro, busqueda])
+
+  // Conteo por tipo de servicio con los filtros base (días/barrio/búsqueda),
+  // excluyendo los chips para que el multiselección siga siendo utilizable.
+  const conteoServicios = useMemo(() => {
+    const porTipo = new Map<string, number>()
+    const q = limpiarTexto(busqueda)
+    for (const s of servicios) {
+      if (filtroDias.tipo === 'exacto' && s.dias_antiguedad !== filtroDias.dias) continue
+      if (filtroDias.tipo === 'minimo' && s.dias_antiguedad < filtroDias.dias) continue
+      if (barrioFiltro && limpiarBarrio(s.barrio) !== barrioFiltro) continue
+      if (q) {
+        const campos = [s.nombre_cliente, s.identificacion, s.referencia_pago]
+        if (!campos.some((c) => limpiarTexto(c ?? '').includes(q))) continue
+      }
+      const clave = limpiarTexto(s.tipo_servicio)
+      porTipo.set(clave, (porTipo.get(clave) ?? 0) + 1)
+    }
+    return porTipo
+  }, [servicios, filtroDias, barrioFiltro, busqueda])
+
+  const hayFiltros =
+    filtroDias.tipo !== 'todas' ||
+    Boolean(barrioFiltro) ||
+    busqueda.trim().length > 0 ||
+    serviciosFiltro.length > 0
 
   // Barrios del técnico (acordeón) sobre las órdenes filtradas, por criticidad.
   const barrios = useMemo(() => {
@@ -233,6 +291,55 @@ export function RadiografiaTecnico({
     setServiciosFiltro([])
   }
 
+  // Valor serializado del <select> de días. El modo "personalizado" conserva
+  // el input visible aunque el mínimo aplicado sea arbitrario.
+  const valorSelectorDias = personalizado
+    ? 'personalizado'
+    : filtroDias.tipo === 'todas'
+      ? 'todas'
+      : filtroDias.tipo === 'exacto'
+        ? `exacto:${filtroDias.dias}`
+        : filtroDias.dias === 3
+          ? 'minimo:3'
+          : 'personalizado'
+
+  function cambiarFiltroDias(valor: string) {
+    setPagina(1)
+    if (valor === 'personalizado') {
+      setPersonalizado(true)
+      return
+    }
+    setPersonalizado(false)
+    if (valor === 'todas') {
+      setFiltroDias({ tipo: 'todas' })
+      setUmbralBorrador('')
+      return
+    }
+    const [tipo, diasTexto] = valor.split(':')
+    const dias = Number(diasTexto)
+    if (!Number.isFinite(dias) || dias < 0) return
+    if (tipo === 'exacto') setFiltroDias({ tipo: 'exacto', dias })
+    else setFiltroDias({ tipo: 'minimo', dias })
+  }
+
+  function aplicarPersonalizado() {
+    const n = Number(umbralBorrador)
+    if (!Number.isFinite(n) || n < 1) return
+    setFiltroDias({ tipo: 'minimo', dias: Math.floor(n) })
+    setPersonalizado(true)
+    setPagina(1)
+  }
+
+  function limpiarFiltros() {
+    setBusqueda('')
+    setBarrioFiltro('')
+    setFiltroDias({ tipo: 'todas' })
+    setServiciosFiltro([])
+    setUmbralBorrador('')
+    setPersonalizado(false)
+    setPagina(1)
+  }
+
   function ordenarPor(columna: ColumnaOrden) {
     setOrden((prev) =>
       prev.columna === columna
@@ -270,7 +377,14 @@ export function RadiografiaTecnico({
       }
 
       const filtros: string[] = []
-      if (umbralDias !== null) filtros.push(`≥ ${umbralDias} días`)
+      if (filtroDias.tipo === 'exacto') filtros.push(`Día exacto: ${filtroDias.dias}`)
+      if (filtroDias.tipo === 'minimo') filtros.push(`≥ ${filtroDias.dias} días`)
+      if (barrioFiltro) {
+        const etiquetaBarrio =
+          barriosDisponibles.find((b) => b.clave === barrioFiltro)?.etiqueta ?? barrioFiltro
+        filtros.push(`Barrio: ${etiquetaBarrio}`)
+      }
+      if (busqueda.trim()) filtros.push(`Búsqueda: "${busqueda.trim()}"`)
       if (serviciosFiltro.length > 0) filtros.push(`${serviciosFiltro.length} servicio(s)`)
       const notaFiltros = `Filtros: ${filtros.length > 0 ? filtros.join(' + ') : 'Todas'}`
 
@@ -286,7 +400,7 @@ export function RadiografiaTecnico({
         : grupos.length === 1
           ? slugificar(grupos[0].tecnico.nombre)
           : `consolidado-${grupos.length}-tecnicos`
-      const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
+      const sufijo = sufijoFiltroDias(filtroDias)
       doc.save(`PD-${base}${sufijo}-${marcaDeTiempo()}.pdf`)
       notificar(
         grupos.length === 1
@@ -307,7 +421,7 @@ export function RadiografiaTecnico({
   // Nombre del PNG compartido entre la copia y la descarga directa.
   async function nombrePng(): Promise<string> {
     const { slugificar, marcaDeTiempo } = await import('../../services/pdfGenerator')
-    const sufijo = umbralDias !== null ? `-mas-${umbralDias}dias` : ''
+    const sufijo = sufijoFiltroDias(filtroDias)
     const base = patrullaSeleccionada
       ? slugificar(nombreBase)
       : tecnicos.length === 1
@@ -387,13 +501,13 @@ export function RadiografiaTecnico({
               <span
                 className={cn(
                   'rounded-full px-2 py-0.5 text-xs font-semibold ring-1 tabular-nums',
-                  esModoSinAsignar || umbralDias !== null
+                  esModoSinAsignar || hayFiltros
                     ? 'bg-amber-500/15 text-amber-200 ring-amber-500/30'
                     : 'bg-white/10 text-slate-200 ring-white/15',
                 )}
               >
-                {umbralDias !== null
-                  ? `${serviciosFiltrados.length} órdenes (≥ ${umbralDias} días) de ${total} totales`
+                {hayFiltros
+                  ? `${serviciosFiltrados.length} de ${total} órdenes`
                   : `${total} órdenes`}
               </span>
             </h3>
@@ -410,72 +524,6 @@ export function RadiografiaTecnico({
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-          {/* Umbral dinámico de días */}
-          <div
-            className={cn(
-              'inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 transition',
-              umbralDias !== null
-                ? 'border-amber-500 bg-amber-950/60 text-amber-200'
-                : 'border-white/10 bg-white/5 text-slate-300',
-            )}
-          >
-            <label htmlFor="umbral-dias-tecnico" className="sr-only">
-              Filtrar por días mínimos de antigüedad
-            </label>
-            <select
-              id="umbral-dias-tecnico"
-              value={umbralDias === null ? 'todas' : String(umbralDias)}
-              onChange={(e) => {
-                const valor = e.target.value
-                setUmbralDias(valor === 'todas' ? null : Number(valor))
-                setUmbralBorrador('')
-              }}
-              className="cursor-pointer rounded border-none bg-transparent text-[11px] font-semibold outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
-            >
-              <option value="todas" className="bg-slate-900 text-slate-200">
-                ⏱️ Todas las edades
-              </option>
-              {UMBRALES_RAPIDOS.map((o) => (
-                <option key={o.etiqueta} value={o.valor ?? 'todas'} className="bg-slate-900 text-slate-200">
-                  {o.etiqueta}
-                </option>
-              ))}
-            </select>
-
-            <input
-              type="number"
-              min={1}
-              max={365}
-              inputMode="numeric"
-              value={umbralBorrador}
-              onChange={(e) => setUmbralBorrador(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key !== 'Enter') return
-                const n = Number(umbralBorrador)
-                if (!Number.isFinite(n) || n < 1) return
-                setUmbralDias(Math.floor(n))
-                setUmbralBorrador('')
-              }}
-              placeholder="≥ n"
-              aria-label="Umbral personalizado de días (Enter para aplicar)"
-              className="w-14 rounded border border-slate-700 bg-slate-950 py-0.5 text-center text-[11px] font-semibold text-amber-200 placeholder:text-slate-500 focus:border-amber-500 focus:outline-none"
-            />
-
-            {umbralDias !== null && (
-              <button
-                type="button"
-                onClick={() => {
-                  setUmbralDias(null)
-                  setUmbralBorrador('')
-                }}
-                aria-label="Quitar filtro de días"
-                className="inline-flex items-center rounded p-0.5 text-amber-200/80 transition hover:bg-amber-500/20 hover:text-amber-100"
-              >
-                <X className="size-3" />
-              </button>
-            )}
-          </div>
-
           <button
             type="button"
             onClick={() => void descargarPlanilla()}
@@ -519,6 +567,109 @@ export function RadiografiaTecnico({
           </button>
         </div>
       </header>
+
+      {/* Barra de filtros tácticos: buscador, barrio y antigüedad. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[190px] flex-1">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-slate-400" />
+          <input
+            type="search"
+            value={busqueda}
+            onChange={(e) => {
+              setBusqueda(e.target.value)
+              setPagina(1)
+            }}
+            placeholder="Buscar por cliente, CC o Ref…"
+            aria-label="Buscar por cliente, CC o referencia de pago"
+            className="w-full rounded-lg border border-white/10 bg-white/5 py-1.5 pr-2 pl-8 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-400/60 focus:outline-none"
+          />
+        </div>
+
+        <select
+          value={barrioFiltro}
+          onChange={(e) => {
+            setBarrioFiltro(e.target.value)
+            setPagina(1)
+          }}
+          aria-label="Filtrar por barrio"
+          className="max-w-[210px] cursor-pointer rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-xs font-medium text-slate-200 focus:border-cyan-400/60 focus:outline-none"
+        >
+          <option value="" className="bg-slate-900 text-slate-200">
+            Todos los barrios
+          </option>
+          {barriosDisponibles.map((b) => (
+            <option key={b.clave} value={b.clave} className="bg-slate-900 text-slate-200">
+              {b.etiqueta}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={valorSelectorDias}
+          onChange={(e) => cambiarFiltroDias(e.target.value)}
+          aria-label="Filtrar por antigüedad en días"
+          className="cursor-pointer rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-xs font-medium text-slate-200 focus:border-cyan-400/60 focus:outline-none"
+        >
+          <option value="todas" className="bg-slate-900 text-slate-200">
+            Todas las edades
+          </option>
+          <option value="exacto:0" className="bg-slate-900 text-slate-200">
+            Solo Hoy (0 días)
+          </option>
+          <option value="exacto:1" className="bg-slate-900 text-slate-200">
+            Solo 1 día
+          </option>
+          <option value="exacto:2" className="bg-slate-900 text-slate-200">
+            Solo 2 días
+          </option>
+          <option value="minimo:3" className="bg-slate-900 text-slate-200">
+            ≥ 3 días (Críticas)
+          </option>
+          <option value="personalizado" className="bg-slate-900 text-slate-200">
+            Personalizado ≥ N
+          </option>
+        </select>
+
+        {personalizado && (
+          <div className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500 bg-amber-950/60 px-2 py-1 text-amber-200">
+            <label htmlFor="umbral-dias-tecnico" className="sr-only">
+              Días mínimos personalizados
+            </label>
+            <input
+              id="umbral-dias-tecnico"
+              type="number"
+              min={1}
+              max={365}
+              inputMode="numeric"
+              value={umbralBorrador}
+              onChange={(e) => setUmbralBorrador(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') aplicarPersonalizado()
+              }}
+              placeholder="≥ n"
+              aria-label="Umbral personalizado de días (Enter para aplicar)"
+              className="w-14 rounded border border-slate-700 bg-slate-950 py-0.5 text-center text-[11px] font-semibold text-amber-200 placeholder:text-slate-500 focus:border-amber-500 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={aplicarPersonalizado}
+              className="rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-100 transition hover:bg-amber-500/30"
+            >
+              Aplicar
+            </button>
+          </div>
+        )}
+
+        {hayFiltros && (
+          <button
+            type="button"
+            onClick={limpiarFiltros}
+            className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-[11px] font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
+          >
+            <X className="size-3" /> Limpiar filtros
+          </button>
+        )}
+      </div>
 
       {/* Área capturable como imagen: resumen + órdenes visibles */}
       <div
@@ -608,7 +759,7 @@ export function RadiografiaTecnico({
                       activo ? 'text-cyan-300' : 'text-slate-400',
                     )}
                   >
-                    {d.cantidad}
+                    {conteoServicios.get(d.clave) ?? 0}
                   </span>
                 </button>
               )
@@ -720,7 +871,9 @@ export function RadiografiaTecnico({
                                       {s.nombre_cliente || 'SIN NOMBRE'}
                                     </p>
                                     <p className="text-[10px] text-slate-500">
-                                      Ref: {s.referencia_pago || 'S/R'}
+                                      {`Ref: ${s.referencia_pago || 'S/R'}${
+                                        s.identificacion ? ` · CC: ${s.identificacion}` : ''
+                                      }`}
                                     </p>
                                   </td>
                                   <td className="px-3 py-1.5 text-slate-300">
@@ -808,7 +961,9 @@ export function RadiografiaTecnico({
                           {s.nombre_cliente || 'SIN NOMBRE'}
                         </p>
                         <p className="text-[10px] text-slate-500">
-                          Ref: {s.referencia_pago || 'S/R'}
+                          {`Ref: ${s.referencia_pago || 'S/R'}${
+                            s.identificacion ? ` · CC: ${s.identificacion}` : ''
+                          }`}
                         </p>
                       </td>
                       <td className="px-3 py-1.5 text-slate-300">

@@ -559,10 +559,8 @@ export function BalanceCuadrillas({
                                       <li key={p.patrulla.id}>
                                         <div
                                           className={cn(
-                                            'rounded-lg px-2.5 py-2 transition-all',
-                                            seleccionada
-                                              ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
-                                              : 'hover:bg-slate-800/60',
+                                            'rounded-lg border border-indigo-700/40 bg-indigo-950/30 px-2.5 py-2 transition-all',
+                                            seleccionada && 'ring-2 ring-cyan-400/70',
                                           )}
                                         >
                                           <div className="flex items-center gap-2">
@@ -605,6 +603,9 @@ export function BalanceCuadrillas({
                                                 <span className="truncate text-sm font-medium text-slate-200">
                                                   {p.patrulla.nombre}
                                                 </span>
+                                                <span className="shrink-0 text-[10px] font-semibold tracking-wide text-indigo-300 uppercase">
+                                                  🚛 Patrulla
+                                                </span>
                                                 <span className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-slate-300 ring-1 ring-white/15">
                                                   {p.operadores.length}{' '}
                                                   {p.operadores.length === 1
@@ -640,7 +641,10 @@ export function BalanceCuadrillas({
                                                 </li>
                                               ) : (
                                                 p.operadores.map((t) => (
-                                                  <li key={t.tecnicoId}>
+                                                  <li
+                                                    key={t.tecnicoId}
+                                                    className="rounded-md bg-slate-900/60 px-1.5 py-1"
+                                                  >
                                                     <FilaTecnico
                                                       item={t}
                                                       seleccionado={tecnicosSeleccionadosIds.includes(
