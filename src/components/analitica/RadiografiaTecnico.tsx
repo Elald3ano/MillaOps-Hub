@@ -25,7 +25,6 @@ import {
   descargarBlob,
 } from '../../lib/imageExporter'
 import { limpiarBarrio, limpiarTexto } from '../../lib/normalizer'
-import { esServicioLiviano } from '../../lib/tiposServicio'
 import { cn } from '../../lib/utils'
 
 const ITEMS_POR_PAGINA = 30
@@ -879,14 +878,6 @@ export function RadiografiaTecnico({
                                   </td>
                                   <td className="px-3 py-1.5 text-slate-300">
                                     {s.tipo_servicio}
-                                    {!esServicioLiviano(s.tipo_servicio) && (
-                                      <span
-                                        title="Requiere apoyo de patrulla (carro/escalera)"
-                                        className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold text-amber-300 ring-1 ring-amber-500/30"
-                                      >
-                                        🚛 Apoyo
-                                      </span>
-                                    )}
                                   </td>
                                 </tr>
                               ))}
@@ -970,14 +961,6 @@ export function RadiografiaTecnico({
                       </td>
                       <td className="px-3 py-1.5 text-slate-300">
                         {s.tipo_servicio}
-                        {!esServicioLiviano(s.tipo_servicio) && (
-                          <span
-                            title="Requiere apoyo de patrulla (carro/escalera)"
-                            className="ml-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold text-amber-300 ring-1 ring-amber-500/30"
-                          >
-                            🚛 Apoyo
-                          </span>
-                        )}
                       </td>
                       {esMulti && (
                         <td className="px-3 py-1.5 whitespace-nowrap text-slate-300">
