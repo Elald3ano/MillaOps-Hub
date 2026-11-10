@@ -51,7 +51,7 @@ export function AnaliticaDashboard({
   const [barrioExpandido, setBarrioExpandido] = useState<string | null>(null)
   const [modalCargaAbierto, setModalCargaAbierto] = useState(false)
 
-  // Invariante #2: todo responde al universo de las 28 sucursales autorizadas.
+  // Invariante #2: todo responde al universo de las 29 sucursales autorizadas.
   const serviciosAutorizados = useMemo(
     () => servicios.filter((s) => esSucursalAutorizada(s.ciudad)),
     [servicios],

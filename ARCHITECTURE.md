@@ -195,14 +195,14 @@ viva (verificado contra la tabla real), por lo que no requieren migración incre
 
 ### 2.1 Filtro de Jurisdicción — `src/lib/zonasPermitidas.ts`
 
-Lista blanca operativa de **28 sucursales autorizadas** (`SUCURSALES_AUTORIZADAS`):
+Lista blanca operativa de **29 sucursales autorizadas** (`SUCURSALES_AUTORIZADAS`):
 
 ```
 Zarzal, Yumbo, Villa Gorgona, Tulua, Toro Valle, Todos los Santos, Sonso,
 Santander de Quilichao, Roldanillo, Puerto Tejada, Presidente Valle, Palmira,
-Miranda, Jamundi, Guacari, Florida, Chancos, Cerrito, Carmelo, Candelaria,
-Caloto, Cali, La Union Valle, La Paila, Bugalagrande, Buga, BuenaVentura,
-Andalucia
+Miranda, Jamundi, Poblado Valle, Guacari, Florida, Chancos, Cerrito, Carmelo,
+Candelaria, Caloto, Cali, La Union Valle, La Paila, Bugalagrande, Buga,
+BuenaVentura, Andalucia
 ```
 
 1. `Set` precalculado con `limpiarTexto` (búsqueda O(1)).
@@ -444,7 +444,7 @@ cuando hay >1. Exporta planilla conjunta por grupos.
    Todo cruce geográfico usa `limpiarTexto`; el barrio usa `limpiarBarrio` (fusiona nodos sin tocar
    el prefijo de ciudad). Prohibido comparar cadenas crudas en claves de asignación.
 
-2. **La lista blanca de jurisdicción (28 sucursales) se aplica SIEMPRE en la ingesta.**
+2. **La lista blanca de jurisdicción (29 sucursales) se aplica SIEMPRE en la ingesta.**
    `esSucursalAutorizada` en `parseServiciosExcel` y `getServiciosActivos`. Ninguna zona ajena entra
    al despacho, a las métricas ni a los PDF.
 

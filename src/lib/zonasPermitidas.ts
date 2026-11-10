@@ -16,6 +16,7 @@ export const SUCURSALES_AUTORIZADAS = [
   'Palmira',
   'Miranda',
   'Jamundi',
+  'Poblado Valle',
   'Guacari',
   'Florida',
   'Chancos',

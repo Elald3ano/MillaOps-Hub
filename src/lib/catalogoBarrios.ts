@@ -12,6 +12,7 @@ import { limpiarBarrio } from './normalizer'
  * porque `limpiarBarrio` los elimina de todos modos al construir la clave.
  */
 export const BARRIOS_SEMILLA: Record<string, string[]> = {
+  'Poblado Valle': ['Arboleda', 'Poblado'],
   Roldanillo: [
     // Ruta 1
     'ALCAZAR',
