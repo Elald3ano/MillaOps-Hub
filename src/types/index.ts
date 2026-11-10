@@ -78,3 +78,33 @@ export interface FilaMatrizImport {
   tecnico: string
   tipo_servicio?: string
 }
+
+/** Categoría de servicio (clasificación de Intake del Centro de Mando). */
+export interface CategoriaServicio {
+  id: string
+  nombre: string
+  modulo_destino: string
+  color: string
+  activo_despacho: boolean
+  created_at: string
+}
+
+/** Mapeo tipo de solicitud → categoría (tabla mapeo_servicios). */
+export interface MapeoServicio {
+  tipo_solicitud: string
+  categoria_id: string
+  updated_at: string
+}
+
+/** Categoría con sus tipos de servicio ya resueltos (join en memoria). */
+export interface CategoriaConServicios extends CategoriaServicio {
+  tipos_servicio: MapeoServicio[]
+}
+
+/** Asignación editable en la UI de categorización. */
+export interface AsignacionServicio {
+  tipo_solicitud: string
+  categoria_id: string | null
+  /** true si el tipo no existe en mapeo_servicios (fail-open → entra al despacho). */
+  sin_clasificar: boolean
+}

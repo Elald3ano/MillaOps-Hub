@@ -225,6 +225,51 @@ export type Database = {
         }
         Relationships: []
       }
+      categorias_servicios: {
+        Row: {
+          id: string
+          nombre: string
+          modulo_destino: string
+          color: string
+          activo_despacho: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          nombre: string
+          modulo_destino: string
+          color?: string
+          activo_despacho?: boolean
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          nombre?: string
+          modulo_destino?: string
+          color?: string
+          activo_despacho?: boolean
+          created_at?: string
+        }
+        Relationships: []
+      }
+      mapeo_servicios: {
+        Row: {
+          tipo_solicitud: string
+          categoria_id: string
+          updated_at: string
+        }
+        Insert: {
+          tipo_solicitud: string
+          categoria_id: string
+          updated_at?: string
+        }
+        Update: {
+          tipo_solicitud?: string
+          categoria_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: Record<string, never>
     Functions: Record<string, never>

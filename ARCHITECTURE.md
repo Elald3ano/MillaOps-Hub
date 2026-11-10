@@ -141,6 +141,32 @@ la lee de forma defensiva: si la tabla no existe, devuelve `{}` y registra un `c
 - `guardarAuditoriaCierres()` / `getUltimaAuditoriaCierres()` hidratan la UI tras F5 y entre
   usuarios (persistencia multiusuario).
 
+#### `categorias_servicios` — Categorías de intake del Centro de Mando
+
+| Columna           | Tipo        | Restricciones                          |
+|-------------------|-------------|----------------------------------------|
+| `id`              | UUID        | PK, `gen_random_uuid()`                |
+| `nombre`          | TEXT        | NOT NULL                               |
+| `modulo_destino`  | TEXT        | NOT NULL (`centro_mando`, …)           |
+| `color`           | TEXT        | NOT NULL DEFAULT `'#6b7280'` (hex)     |
+| `activo_despacho` | BOOLEAN     | NOT NULL DEFAULT `TRUE`                |
+| `created_at`      | TIMESTAMPTZ | NOT NULL DEFAULT `now()`               |
+
+Seed vivo (4 filas): **Servicios Técnicos** (`activo_despacho = TRUE`, `#10b981`, 24 tipos),
+**Instalaciones y Traslados** (`FALSE`, `#3b82f6`, 18), **Desconexiones y Retiros** (`FALSE`,
+`#f59e0b`, 62) y **Excluidos / Administrativos** (`FALSE`, `#6b7280`, 22).
+
+#### `mapeo_servicios` — Tipo de solicitud → categoría
+
+| Columna          | Tipo        | Restricciones                                        |
+|------------------|-------------|------------------------------------------------------|
+| `tipo_solicitud` | TEXT        | **PK natural** (no existe columna `id`)              |
+| `categoria_id`   | UUID        | NOT NULL · FK → `categorias_servicios(id)`           |
+| `updated_at`     | TIMESTAMPTZ | NOT NULL DEFAULT `now()`                             |
+
+126 filas sembradas. `actualizarCategoriaServicio()` hace `upsert` con
+`{ onConflict: 'tipo_solicitud' }`, de modo que un tipo nuevo se mapea sin migración previa.
+
 #### Políticas RLS (Row Level Security)
 
 Modelo **permisivo** (SPA estática en GitHub Pages): todas las tablas habilitan RLS con políticas
@@ -280,6 +306,32 @@ usan `select` simple: el universo de técnicos es ~33 registros, muy por debajo 
 
 `esCritica(d) = d >= 3` · `conRetraso(d) = d >= 2` (filtro de planilla PDF, `UMBRAL_RETRASO = 2`).
 `clasificarSla()` + `SLA_BADGE_CLASSES` alimentan el bloque sólido de la tabla y el coloreado PDF.
+
+### 2.6 Categorización de Servicios (Intake)
+
+Clasificación previa al motor de asignación, persistida en `categorias_servicios` (4 categorías) y
+`mapeo_servicios` (126 tipos de solicitud). El cruce se hace con `limpiarTexto(tipo_solicitud)`.
+
+#### Regla de Oro — Fail-Open
+
+| Situación | Comportamiento |
+|---|---|
+| Mapeado a categoría con `activo_despacho = TRUE` | **Entra** al despacho (asignación + persistencia). |
+| Mapeado a categoría con `activo_despacho = FALSE` | **Se omite** del despacho (cuenta como `omitidas por categoría`). |
+| **Sin mapeo** ("Sin Clasificar") | **Entra** al despacho y se reporta en la alerta ámbar de la UI. |
+
+- Si **todas** las órdenes abiertas caen en categorías excluidas, el intake corta **antes** de
+  `reemplazarServiciosActivos` (que empieza borrando los lotes) y notifica el error: el despacho
+  vigente nunca se destruye.
+- `obtenerTiposNoDespachables()` devuelve un `Set` con solo las claves excluidas (O(1) por orden).
+
+#### UI — `CategorizacionServicios.tsx` + `GestionTerritorial.tsx`
+
+Gestión Territorial tiene dos sub-pestañas: **Directorio de Técnicos** (`DirectorioTecnicos`) y
+**Categorías de Servicios** (`CategorizacionServicios`). Con un técnico seleccionado se muestra
+`DetalleTecnicoTerritorio` sin sub-navegación. La vista de categorías renderiza tarjetas por
+categoría con su color, conteo y badge de `activo_despacho`, buscador global, un `<select>` por
+tipo para reasignar en caliente (`upsert` inmediato) y la alerta ámbar de tipos sin clasificar.
 
 ---
 

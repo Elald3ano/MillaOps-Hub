@@ -4,8 +4,11 @@ import { limpiarBarrio, limpiarTexto } from '../lib/normalizer'
 import { ciudadCanonica, esSucursalAutorizada } from '../lib/zonasPermitidas'
 import type { Database } from '../types/database'
 import type {
+  CategoriaConServicios,
+  CategoriaServicio,
   ConfigCuadrilla,
   FilaMatrizImport,
+  MapeoServicio,
   NuevaRegla,
   ReglaAsignacion,
   ReglaConTecnico,
@@ -20,6 +23,9 @@ type ReglaRow = Database['public']['Tables']['reglas_asignacion']['Row']
 type ServicioRow = Database['public']['Tables']['servicios']['Row']
 type AuditoriaCierresRow = Database['public']['Tables']['auditorias_cierres']['Row']
 type AuditoriaCierresInsert = Database['public']['Tables']['auditorias_cierres']['Insert']
+type CategoriaRow = Database['public']['Tables']['categorias_servicios']['Row']
+type CategoriaInsert = Database['public']['Tables']['categorias_servicios']['Insert']
+type MapeoServicioRow = Database['public']['Tables']['mapeo_servicios']['Row']
 
 // Supabase limita el payload de una inserción; se particiona en lotes de 500.
 const TAMANO_LOTE_INSERCION = 500
@@ -730,4 +736,150 @@ export async function getUltimaAuditoriaCierres(): Promise<AuditoriaCierresRow |
     return null
   }
   return data
+}
+
+// ---- Categorización dinámica de servicios (Intake) ----
+
+/**
+ * Devuelve todas las categorías con sus tipos de servicio resueltos en memoria.
+ * El esquema no declara FK embebida usable por PostgREST, así que se leen ambas
+ * tablas paginadas y se agrupan por `categoria_id`.
+ */
+export async function obtenerCategoriasServicios(): Promise<CategoriaConServicios[]> {
+  const [categoriasResult, mapeosResult] = await Promise.all([
+    leerTodasLasFilas<CategoriaRow>((desde, hasta) =>
+      supabase.from('categorias_servicios').select('*').order('nombre').range(desde, hasta),
+    ),
+    leerTodasLasFilas<MapeoServicioRow>((desde, hasta) =>
+      supabase.from('mapeo_servicios').select('*').order('tipo_solicitud').range(desde, hasta),
+    ),
+  ])
+
+  if (categoriasResult.error) {
+    throw new Error(`Error al obtener categorías: ${categoriasResult.error.message}`)
+  }
+  if (mapeosResult.error) {
+    throw new Error(`Error al obtener el mapeo de servicios: ${mapeosResult.error.message}`)
+  }
+
+  const tiposPorCategoria = new Map<string, MapeoServicio[]>()
+  for (const mapeo of mapeosResult.data) {
+    const lista = tiposPorCategoria.get(mapeo.categoria_id) ?? []
+    lista.push({
+      tipo_solicitud: mapeo.tipo_solicitud,
+      categoria_id: mapeo.categoria_id,
+      updated_at: mapeo.updated_at,
+    })
+    tiposPorCategoria.set(mapeo.categoria_id, lista)
+  }
+
+  return categoriasResult.data.map((categoria) => ({
+    id: categoria.id,
+    nombre: categoria.nombre,
+    modulo_destino: categoria.modulo_destino,
+    color: categoria.color,
+    activo_despacho: categoria.activo_despacho,
+    created_at: categoria.created_at,
+    tipos_servicio: tiposPorCategoria.get(categoria.id) ?? [],
+  }))
+}
+
+/**
+ * Mapa normalizado `limpiarTexto(tipo_solicitud)` → `categoria_id`.
+ * Se usa para resolver el destino de una orden sin comparar cadenas crudas.
+ */
+export async function obtenerMapaCategorias(): Promise<Map<string, string>> {
+  const { data, error } = await leerTodasLasFilas<MapeoServicioRow>((desde, hasta) =>
+    supabase.from('mapeo_servicios').select('*').order('tipo_solicitud').range(desde, hasta),
+  )
+
+  if (error) throw new Error(`Error al obtener el mapeo de servicios: ${error.message}`)
+
+  const mapa = new Map<string, string>()
+  for (const fila of data) {
+    mapa.set(limpiarTexto(fila.tipo_solicitud), fila.categoria_id)
+  }
+  return mapa
+}
+
+/** Reasigna (o crea) el mapeo de un tipo de solicitud hacia otra categoría. */
+export async function actualizarCategoriaServicio(
+  tipoSolicitud: string,
+  nuevaCategoriaId: string,
+): Promise<void> {
+  const tipo = tipoSolicitud.trim()
+  const categoriaId = nuevaCategoriaId.trim()
+  if (!tipo) throw new Error('El tipo de solicitud no puede estar vacío.')
+  if (!categoriaId) throw new Error('La categoría destino no es válida.')
+
+  const { error } = await supabase.from('mapeo_servicios').upsert(
+    {
+      tipo_solicitud: tipo,
+      categoria_id: categoriaId,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'tipo_solicitud' },
+  )
+
+  if (error) {
+    throw new Error(`No se pudo reasignar "${tipo}": ${error.message}`)
+  }
+}
+
+/** Crea una categoría nueva (activa en despacho por defecto). */
+export async function crearCategoria(
+  nombre: string,
+  moduloDestino: string,
+  color: string,
+): Promise<CategoriaServicio> {
+  const nombreLimpio = nombre.trim()
+  if (!nombreLimpio) throw new Error('El nombre de la categoría no puede estar vacío.')
+
+  const fila: CategoriaInsert = {
+    nombre: nombreLimpio,
+    modulo_destino: moduloDestino.trim() || 'centro_mando',
+  }
+  const colorLimpio = color.trim()
+  if (colorLimpio) fila.color = colorLimpio
+
+  const { data, error } = await supabase
+    .from('categorias_servicios')
+    .insert(fila)
+    .select('*')
+    .single()
+
+  if (error) throw new Error(`No se pudo crear la categoría: ${error.message}`)
+  if (!data) throw new Error('No se recibió confirmación al crear la categoría.')
+
+  return {
+    id: data.id,
+    nombre: data.nombre,
+    modulo_destino: data.modulo_destino,
+    color: data.color,
+    activo_despacho: data.activo_despacho,
+    created_at: data.created_at,
+  }
+}
+
+/**
+ * Set de claves normalizadas (`limpiarTexto(tipo_solicitud)`) cuyo mapeo apunta
+ * a una categoría con `activo_despacho !== true`. El intake las omite; los tipos
+ * sin mapeo NO aparecen aquí (fail-open: entran al despacho).
+ */
+export async function obtenerTiposNoDespachables(): Promise<Set<string>> {
+  const categorias = await obtenerCategoriasServicios()
+
+  const excluidas = new Set(
+    categorias.filter((categoria) => categoria.activo_despacho !== true).map((c) => c.id),
+  )
+
+  const claves = new Set<string>()
+  for (const categoria of categorias) {
+    if (!excluidas.has(categoria.id)) continue
+    for (const mapeo of categoria.tipos_servicio) {
+      const clave = limpiarTexto(mapeo.tipo_solicitud)
+      if (clave) claves.add(clave)
+    }
+  }
+  return claves
 }

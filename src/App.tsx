@@ -3,7 +3,7 @@ import { BarChart3, CodeXml, Database, FileText, Layers, Map as MapIcon, Refresh
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
-import { DirectorioTecnicos } from './components/territorio/DirectorioTecnicos'
+import { GestionTerritorial } from './components/territorio/GestionTerritorial'
 import { AnaliticaDashboard } from './components/analitica/AnaliticaDashboard'
 import { AuditoriaCierresDashboard } from './components/cierres/AuditoriaCierresDashboard'
 import { ToastContainer, type Toast, type ToastVariant } from './components/ToastContainer'
@@ -11,17 +11,21 @@ import { PdfExportModal } from './components/PdfExportModal'
 import { aplicarMatrizAsignacion } from './services/assignmentEngine'
 import { isSupabaseConfigured } from './lib/supabase'
 import {
+  actualizarCategoriaServicio,
   getCiudadesActivas,
   getReglas,
   getServiciosActivos,
   getTecnicos,
   getUltimaAuditoriaCierres,
+  obtenerCategoriasServicios,
+  obtenerTiposNoDespachables,
   reasignarServiciosActivos,
   reemplazarServiciosActivos,
 } from './services/supabaseService'
-import type { ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
+import type { CategoriaConServicios, ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
 import type { ResultadoCierres } from './services/reconciliationService'
 import { cn } from './lib/utils'
+import { limpiarTexto } from './lib/normalizer'
 
 type EstadoConexion = 'conectando' | 'conectado' | 'error'
 type VistaPrincipal = 'centro_mando' | 'territorio' | 'cierres'
@@ -35,6 +39,9 @@ function App() {
   const [serviciosActivos, setServiciosActivos] = useState<Servicio[]>([])
   // Órdenes cerradas del último reporte: solo en memoria, para auditoría.
   const [serviciosCerrados, setServiciosCerrados] = useState<ServicioNuevo[]>([])
+  // Categorización de intake (fail-open): categorías + tipos excluidos del despacho.
+  const [categorias, setCategorias] = useState<CategoriaConServicios[]>([])
+  const [tiposNoDespachables, setTiposNoDespachables] = useState<Set<string>>(new Set())
 
   // UI
   const [cargando, setCargando] = useState(true)
@@ -79,17 +86,29 @@ function App() {
         return
       }
       try {
-        const [tecnicosData, reglasData, serviciosData, ciudadesData] = await Promise.all([
+        const [
+          tecnicosData,
+          reglasData,
+          serviciosData,
+          ciudadesData,
+          categoriasData,
+          noDespachables,
+        ] = await Promise.all([
           getTecnicos(),
           getReglas(),
           getServiciosActivos(),
           getCiudadesActivas(),
+          // Defensivo: si la migración de categorización aún no existe, no rompe la carga.
+          obtenerCategoriasServicios().catch(() => null),
+          obtenerTiposNoDespachables().catch(() => null),
         ])
 
         setTecnicos(tecnicosData)
         setReglas(reglasData)
         setServiciosActivos(serviciosData)
         setCiudadesActivas(ciudadesData)
+        setCategorias(categoriasData ?? [])
+        setTiposNoDespachables(noDespachables ?? new Set<string>())
         setConexion('conectado')
       } catch (error) {
         // Nunca se propaga: la app sigue montada y muestra el estado de error.
@@ -195,6 +214,50 @@ function App() {
     }
   }, [refrescarServicios, notificar])
 
+  // Persiste el cambio de categoría y refresca intake (categorías + exclusiones).
+  const reasignarCategoria = useCallback(
+    async (tipo: string, categoriaId: string) => {
+      try {
+        await actualizarCategoriaServicio(tipo, categoriaId)
+        const [cats, noDisp] = await Promise.all([
+          obtenerCategoriasServicios(),
+          obtenerTiposNoDespachables(),
+        ])
+        setCategorias(cats)
+        setTiposNoDespachables(noDisp)
+        notificar(`"${tipo}" reasignado correctamente.`, 'success')
+      } catch (error) {
+        notificar(
+          error instanceof Error ? error.message : 'No se pudo reasignar el tipo de servicio.',
+          'error',
+        )
+        // Se propaga para que la tarjeta libere su estado de "actualizando".
+        throw error
+      }
+    },
+    [notificar],
+  )
+
+  // Tipos del despacho activo que no aparecen en ninguna categoría (fail-open).
+  const sinClasificar = useMemo(() => {
+    const clasificados = new Set<string>()
+    for (const categoria of categorias) {
+      for (const mapeo of categoria.tipos_servicio) {
+        clasificados.add(limpiarTexto(mapeo.tipo_solicitud))
+      }
+    }
+
+    const vistos = new Set<string>()
+    const resultado: string[] = []
+    for (const servicio of serviciosActivos) {
+      const clave = limpiarTexto(servicio.tipo_servicio)
+      if (!clave || clasificados.has(clave) || vistos.has(clave)) continue
+      vistos.add(clave)
+      resultado.push(servicio.tipo_servicio)
+    }
+    return resultado.sort((a, b) => a.localeCompare(b))
+  }, [categorias, serviciosActivos])
+
   const handleProcesar = useCallback(
     async (file: File, ciudadFiltro: string | undefined): Promise<boolean> => {
       setProcesando(true)
@@ -225,6 +288,20 @@ function App() {
           return true
         }
 
+        // Fail-open: se omiten solo los tipos mapeados a una categoría con activo_despacho = false.
+        const filtrados = abiertos.filter(
+          (servicio) => !tiposNoDespachables.has(limpiarTexto(servicio.tipo_servicio)),
+        )
+        const omitidos = abiertos.length - filtrados.length
+
+        if (filtrados.length === 0) {
+          notificar(
+            `Las ${abiertos.length} órdenes abiertas pertenecen a categorías excluidas del despacho.`,
+            'error',
+          )
+          return false
+        }
+
         // 2. Reglas territoriales activas (si el estado local está vacío, se consulta).
         let reglasActivas = reglas
         if (reglasActivas.length === 0) {
@@ -232,8 +309,8 @@ function App() {
         }
         console.log(`[Asignacion] Reglas activas disponibles: ${reglasActivas.length}`)
 
-        // 3. Asignación directa con la matriz (solo órdenes abiertas).
-        const asignados = aplicarMatrizAsignacion(abiertos, reglasActivas)
+        // 3. Asignación directa con la matriz (solo órdenes abiertas despachables).
+        const asignados = aplicarMatrizAsignacion(filtrados, reglasActivas)
 
         // 4. Reemplazar el despacho activo en Supabase (solo abiertas).
         await reemplazarServiciosActivos(nombre, asignados)
@@ -246,7 +323,7 @@ function App() {
 
         const asignadosCount = asignados.filter((s) => s.tecnico_id !== null).length
         notificar(
-          `Despacho listo: ${asignados.length} órdenes abiertas (${asignadosCount} asignadas) · ${cerrados.length} cerradas en auditoría.`,
+          `Despacho listo: ${asignados.length} órdenes abiertas (${asignadosCount} asignadas) · ${cerrados.length} cerradas en auditoría${omitidos > 0 ? ` · ${omitidos} omitidas por categoría` : ''}.`,
           'success',
         )
         return true
@@ -260,7 +337,7 @@ function App() {
         setProcesando(false)
       }
     },
-    [reglas, cargarDatos, notificar],
+    [reglas, cargarDatos, notificar, tiposNoDespachables],
   )
 
   const conexionInfo =
@@ -466,14 +543,21 @@ function App() {
                 onActualizado={refrescarTerritorio}
               />
             ) : (
-              <DirectorioTecnicos
+              <GestionTerritorial
+                tecnicoSeleccionado={tecnicoSeleccionado}
                 tecnicos={tecnicos}
                 reglas={reglas}
+                servicios={serviciosActivos}
                 ciudadesActivas={ciudadesActivas}
                 onSeleccionar={setTecnicoSeleccionadoId}
-                notificar={notificar}
+                onVolver={() => void volverAlDirectorio()}
                 onCreado={handleTecnicoCreado}
                 onCambio={refrescarTrasGuardarCuadrilla}
+                onActualizado={refrescarTerritorio}
+                categorias={categorias}
+                sinClasificar={sinClasificar}
+                onReasignarCategoria={reasignarCategoria}
+                notificar={notificar}
               />
             )}
           </>
