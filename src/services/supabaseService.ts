@@ -600,8 +600,10 @@ export async function asignarCuadrilla(
   ciudad: string,
   config: ConfigCuadrilla,
 ): Promise<number> {
-  const ciudadLimpia = limpiarTexto(ciudad)
-  const ciudadNombre = ciudad.trim()
+  // Se persiste la forma canónica ("Toro Valle" y no "Toro"): la base guarda
+  // texto crudo y el índice único compara cadenas, así que unificar aquí es lo
+  // que evita filas duplicadas para la misma sucursal.
+  const ciudadNombre = ciudadCanonica(ciudad).trim() || ciudad.trim()
   // Deduplicación estricta en memoria antes de tocar la base de datos.
   const barriosUnicos = Array.from(
     new Set(config.barrios.map((b) => b.trim()).filter((b) => b !== '')),
@@ -610,37 +612,67 @@ export async function asignarCuadrilla(
     new Set(config.servicios.map((s) => s.trim()).filter((s) => s !== '')),
   )
 
-  // 1. Borrar de forma tolerante a mayúsculas/minúsculas todas las reglas
-  //    previas de este técnico en esta ciudad.
-  const { error: deleteError } = await supabase
+  // 1. Borrar TODAS las reglas previas de este técnico cuya ciudad resuelva a la
+  //    misma sucursal canónica. `ilike('ciudad', ...)` solo cubría el texto
+  //    literal, dejando vivas variantes como "Toro" cuando se guardaba
+  //    "Toro Valle" (misma sucursal, otro string).
+  const ciudadKey = limpiarTexto(ciudadNombre)
+  const { data: reglasPropias, error: readPropiasError } = await supabase
     .from('reglas_asignacion')
-    .delete()
+    .select('id, ciudad')
     .eq('tecnico_id', tecnicoId)
-    .ilike('ciudad', ciudadNombre)
 
-  if (deleteError) {
-    console.error('[asignarCuadrilla] Error borrando reglas previas:', deleteError)
-    throw new Error(`No se pudieron limpiar las reglas anteriores: ${deleteError.message}`)
+  if (readPropiasError) {
+    throw new Error(`Error al leer reglas propias: ${readPropiasError.message}`)
+  }
+
+  const idsPropias = (reglasPropias ?? [])
+    .filter((r) => limpiarTexto(ciudadCanonica(r.ciudad) || r.ciudad) === ciudadKey)
+    .map((r) => r.id)
+
+  if (idsPropias.length > 0) {
+    const { error: deleteError } = await supabase
+      .from('reglas_asignacion')
+      .delete()
+      .in('id', idsPropias)
+
+    if (deleteError) {
+      console.error('[asignarCuadrilla] Error borrando reglas previas:', deleteError)
+      throw new Error(`No se pudieron limpiar las reglas anteriores: ${deleteError.message}`)
+    }
   }
 
   // 2. Traspaso (solo cuadrilla general): quitar la regla general (P2) de otros
   //    técnicos en los barrios seleccionados (1 barrio = 1 carro).
   if (config.modalidad === 'general' && barriosUnicos.length > 0) {
-    const { data: reglasAjenas, error: readAjenoError } = await supabase
-      .from('reglas_asignacion')
-      .select('id, ciudad, barrio, tipo_servicio')
-      .neq('tecnico_id', tecnicoId)
+    // Se leen TODAS las filas paginando: PostgREST trunca en 1.000 y la matriz
+    // ya supera ese tamaño, por lo que las reglas del dueño actual podían no
+    // llegar a la vista y el traspaso se saltaba en silencio.
+    const reglasExistentes = await leerTodasLasFilas<{
+      id: string
+      tecnico_id: string
+      ciudad: string
+      barrio: string | null
+      tipo_servicio: string | null
+    }>((desde, hasta) =>
+      supabase
+        .from('reglas_asignacion')
+        .select('id, tecnico_id, ciudad, barrio, tipo_servicio')
+        .order('id')
+        .range(desde, hasta),
+    )
 
-    if (readAjenoError) {
-      throw new Error(`Error al leer reglas ajenas: ${readAjenoError.message}`)
+    if (reglasExistentes.error) {
+      throw new Error(`Error al leer reglas ajenas: ${reglasExistentes.error.message}`)
     }
 
     const barriosLimpios = new Set(barriosUnicos.map(limpiarBarrio))
-    const idsAjenos = (reglasAjenas ?? [])
+    const idsAjenos = reglasExistentes.data
       .filter(
         (r) =>
+          r.tecnico_id !== tecnicoId &&
           !r.tipo_servicio &&
-          limpiarTexto(r.ciudad) === ciudadLimpia &&
+          limpiarTexto(ciudadCanonica(r.ciudad) || r.ciudad) === ciudadKey &&
           barriosLimpios.has(limpiarBarrio(r.barrio)),
       )
       .map((r) => r.id)
@@ -707,6 +739,51 @@ export async function asignarCuadrilla(
   // 5. Re-aplicar la matriz al despacho activo y devolver el total insertado.
   await reasignarServiciosActivos()
   return registros.length
+}
+
+/**
+ * Libera las reglas territoriales que aún cuelgan de fichas convertidas en
+ * **patrulla**. Por arquitectura la patrulla no tiene barrios propios: su
+ * territorio es la unión de los barrios de sus operadores, así que cualquier
+ * fila en `reglas_asignacion` a su nombre **bloquea** el índice P2
+ * (`idx_regla_especialidad_unica`, 1 barrio = 1 carro) e impide que sus propios
+ * operadores tomen esos barrios.
+ *
+ * Con `confirmar = false` solo calcula el impacto; con `true` ejecuta el borrado.
+ * Devuelve el número de reglas que quedan (o quedarían) liberadas.
+ */
+export async function liberarReglasDePatrullas(confirmar: boolean): Promise<number> {
+  const [tecnicosResult, reglasResult] = await Promise.all([
+    leerTodasLasFilas<TecnicoRow>((desde, hasta) =>
+      supabase.from('tecnicos').select('*').order('id').range(desde, hasta),
+    ),
+    leerTodasLasFilas<ReglaRow>((desde, hasta) =>
+      supabase.from('reglas_asignacion').select('*').order('id').range(desde, hasta),
+    ),
+  ])
+
+  if (tecnicosResult.error) {
+    throw new Error(`Error al leer técnicos: ${tecnicosResult.error.message}`)
+  }
+  if (reglasResult.error) {
+    throw new Error(`Error al leer reglas: ${reglasResult.error.message}`)
+  }
+
+  const patrullaIds = new Set(
+    tecnicosResult.data.filter((t) => t.rol === 'patrulla').map((t) => t.id),
+  )
+  const idsADescongestionar = reglasResult.data
+    .filter((r) => patrullaIds.has(r.tecnico_id))
+    .map((r) => r.id)
+
+  if (!confirmar || idsADescongestionar.length === 0) return idsADescongestionar.length
+
+  for (const chunk of chunkArray(idsADescongestionar, TAMANO_LOTE_ACTUALIZACION)) {
+    const { error } = await supabase.from('reglas_asignacion').delete().in('id', chunk)
+    if (error) throw new Error(`Error al liberar reglas de patrullas: ${error.message}`)
+  }
+
+  return idsADescongestionar.length
 }
 
 /**

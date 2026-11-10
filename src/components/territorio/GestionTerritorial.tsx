@@ -1,14 +1,15 @@
 import { useState } from 'react'
-import { Tags, Users } from 'lucide-react'
+import { Tags, Users, Wrench } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { DirectorioTecnicos } from './DirectorioTecnicos'
 import { DetalleTecnicoTerritorio } from './DetalleTecnicoTerritorio'
 import { CategorizacionServicios } from './CategorizacionServicios'
+import { PanelReglasPatrulla } from './PanelReglasPatrulla'
 import type { CategoriaConServicios, ReglaConTecnico, Servicio, Tecnico } from '../../types'
 import type { ToastVariant } from '../ToastContainer'
 
-type SubVista = 'directorio' | 'categorias'
+type SubVista = 'directorio' | 'categorias' | 'mantenimiento'
 
 interface GestionTerritorialProps {
   /** Técnico abierto en la ficha; si existe se omite el nivel de sub-pestañas. */
@@ -31,6 +32,7 @@ interface GestionTerritorialProps {
 const SUB_VISTAS: Array<{ id: SubVista; label: string; icon: LucideIcon }> = [
   { id: 'directorio', label: 'Directorio de Técnicos', icon: Users },
   { id: 'categorias', label: 'Categorías de Servicios', icon: Tags },
+  { id: 'mantenimiento', label: 'Mantenimiento', icon: Wrench },
 ]
 
 /**
@@ -103,12 +105,18 @@ export function GestionTerritorial({
           onCreado={onCreado}
           onCambio={onCambio}
         />
-      ) : (
+      ) : subVista === 'categorias' ? (
         <CategorizacionServicios
           categorias={categorias}
           sinClasificar={sinClasificar}
           onReasignar={onReasignarCategoria}
           notificar={notificar}
+        />
+      ) : (
+        <PanelReglasPatrulla
+          tecnicos={tecnicos}
+          notificar={notificar}
+          onCambio={onCambio}
         />
       )}
     </div>
