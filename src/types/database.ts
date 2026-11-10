@@ -48,6 +48,24 @@ export type Database = {
         }
         Relationships: []
       }
+      catalogo_barrios: {
+        Row: {
+          ciudad: string
+          barrio: string
+          created_at: string
+        }
+        Insert: {
+          ciudad: string
+          barrio: string
+          created_at?: string
+        }
+        Update: {
+          ciudad?: string
+          barrio?: string
+          created_at?: string
+        }
+        Relationships: []
+      }
       reglas_asignacion: {
         Row: {
           id: string

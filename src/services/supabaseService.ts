@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase'
 import { aplicarMatrizAsignacion, calcularPrioridad } from './assignmentEngine'
-import { limpiarBarrio, limpiarTexto } from '../lib/normalizer'
+import { limpiarBarrio, limpiarPrefijoNodo, limpiarTexto } from '../lib/normalizer'
 import { ciudadCanonica, esSucursalAutorizada } from '../lib/zonasPermitidas'
 import type { Database } from '../types/database'
 import type {
@@ -296,6 +296,89 @@ export async function getServiciosActivos(): Promise<Servicio[]> {
 }
 
 /**
+ * Nutre el catálogo maestro `catalogo_barrios` con los barrios observados.
+ *
+ * Los chips de Gestión Territorial se construían solo desde `servicios` +
+ * `reglas_asignacion` (+ semilla estática); un barrio sin órdenes y sin dueño
+ * desaparecía de la pantalla y quedaba inaccesible. El catálogo es acumulativo
+ * y NUNCA se borra: una vez visto, el barrio siempre se puede reasignar.
+ *
+ * Tolerante a fallos: si la migración aún no se ejecutó, no rompe la ingesta
+ * (devuelve 0 y registra el aviso). Todo se normaliza con `limpiarTexto` y
+ * `limpiarBarrio` (Invariante #1) para no acumular variantes del mismo barrio.
+ */
+export async function sincronizarCatalogoBarrios(
+  pares: Array<{ ciudad: string; barrio: string | null }>,
+): Promise<number> {
+  // Clave (ciudad canónica, barrio canónico) → texto legible a persistir.
+  const unicos = new Map<string, { ciudad: string; barrio: string }>()
+
+  for (const { ciudad, barrio } of pares) {
+    const nombreBarrio = barrio?.trim() ?? ''
+    if (!nombreBarrio) continue
+    const canonica = ciudadCanonica(ciudad) || ciudad.trim()
+    if (!canonica) continue
+    const ck = limpiarTexto(canonica)
+    const bk = limpiarBarrio(nombreBarrio)
+    if (!ck || !bk) continue
+    const clave = `${ck}|${bk}`
+    if (!unicos.has(clave)) {
+      // Se persiste el nombre legible sin el prefijo de nodo comercial.
+      unicos.set(clave, { ciudad: canonica, barrio: limpiarPrefijoNodo(nombreBarrio) })
+    }
+  }
+
+  const filas = [...unicos.values()]
+  if (filas.length === 0) return 0
+
+  let insertadas = 0
+  for (const chunk of chunkArray(filas, TAMANO_LOTE_INSERCION)) {
+    const { error } = await supabase
+      .from('catalogo_barrios')
+      .upsert(chunk, { onConflict: 'ciudad,barrio', ignoreDuplicates: true })
+
+    if (error) {
+      // La tabla puede no existir todavía (migración pendiente): no se bloquea
+      // la ingesta, el catálogo simplemente no crece hasta aplicarla.
+      console.warn('[sincronizarCatalogoBarrios] No se pudo nutrir el catálogo:', error.message)
+      return insertadas
+    }
+    insertadas += chunk.length
+  }
+
+  return insertadas
+}
+
+/**
+ * Devuelve el catálogo maestro de barrios agrupado por nombre canónico de
+ * ciudad. Si la tabla aún no existe (migración pendiente) devuelve un mapa
+ * vacío para no romper la UI.
+ */
+export async function getCatalogoBarrios(): Promise<Map<string, Map<string, string>>> {
+  const resultado = await leerTodasLasFilas<{ ciudad: string; barrio: string }>((desde, hasta) =>
+    supabase.from('catalogo_barrios').select('ciudad, barrio').order('ciudad').range(desde, hasta),
+  )
+
+  const mapa = new Map<string, Map<string, string>>()
+  if (resultado.error) {
+    console.warn('[getCatalogoBarrios] Catálogo no disponible:', resultado.error.message)
+    return mapa
+  }
+
+  for (const fila of resultado.data) {
+    const canonica = ciudadCanonica(fila.ciudad) || fila.ciudad.trim()
+    const ck = limpiarTexto(canonica)
+    const bk = limpiarBarrio(fila.barrio)
+    if (!ck || !bk) continue
+    const inner = mapa.get(ck) ?? new Map<string, string>()
+    if (!inner.has(bk)) inner.set(bk, limpiarPrefijoNodo(fila.barrio))
+    mapa.set(ck, inner)
+  }
+
+  return mapa
+}
+
+/**
  * Reemplaza el despacho activo: borra los lotes anteriores (cascade elimina sus
  * servicios) y guarda el nuevo conjunto como el despacho actual.
  */
@@ -351,6 +434,12 @@ export async function reemplazarServiciosActivos(
     const { error } = await supabase.from('servicios').insert(filas)
     if (error) throw new Error(`Error al insertar servicios: ${error.message}`)
   }
+
+  // 4. Nutrir el catálogo maestro con los barrios de este corte. Es acumulativo:
+  //    un barrio visto hoy sigue visible aunque mañana quede sin órdenes.
+  await sincronizarCatalogoBarrios(
+    servicios.map((s) => ({ ciudad: s.ciudad, barrio: s.barrio })),
+  )
 }
 
 // ---- Importación masiva de la matriz de asignación ----
@@ -736,7 +825,13 @@ export async function asignarCuadrilla(
     }
   }
 
-  // 5. Re-aplicar la matriz al despacho activo y devolver el total insertado.
+  // 5. Nutrir el catálogo maestro con los barrios recién configurados: quien los
+  //    asigne hoy debe poder recuperarlos mañana aunque se desasignen.
+  await sincronizarCatalogoBarrios(
+    registros.map((r) => ({ ciudad: r.ciudad, barrio: r.barrio })),
+  )
+
+  // 6. Re-aplicar la matriz al despacho activo y devolver el total insertado.
   await reasignarServiciosActivos()
   return registros.length
 }

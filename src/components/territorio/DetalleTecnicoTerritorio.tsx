@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeft,
   Bike,
@@ -22,6 +22,7 @@ import {
   actualizarTecnico,
   asignarCuadrilla,
   desvincularOperadoresDePatrulla,
+  getCatalogoBarrios,
   guardarCiudadesActivasTecnico,
 } from '../../services/supabaseService'
 import { barriosSemilla } from '../../lib/catalogoBarrios'
@@ -233,6 +234,22 @@ export function DetalleTecnicoTerritorio({
     return [...set].sort((a, b) => a.localeCompare(b))
   }, [reglas, servicios, ciudadesActivas])
 
+  // Catálogo maestro persistente (se carga una vez al abrir la ficha). Garantiza
+  // que un barrio desasignado siga apareciendo como chip disponible.
+  const [catalogoBarrios, setCatalogoBarrios] = useState<Map<string, Map<string, string>>>(
+    () => new Map(),
+  )
+
+  useEffect(() => {
+    let vigente = true
+    void getCatalogoBarrios().then((mapa) => {
+      if (vigente) setCatalogoBarrios(mapa)
+    })
+    return () => {
+      vigente = false
+    }
+  }, [])
+
   // Barrios por ciudad: Map<limpiarTexto(ciudad), Map<limpiarBarrio(barrio), nombreLegible>>.
   // La clave canónica `limpiarBarrio` fusiona variantes de nodo comercial
   // (ej. "JAMD-01 VILLA TATIANA" y "JAMD-02 VILLA TATIANA" → "VILLA TATIANA").
@@ -256,6 +273,18 @@ export function DetalleTecnicoTerritorio({
     for (const s of servicios) {
       agregar(s.ciudad, s.barrio)
     }
+    // Catálogo maestro persistente: un barrio ya visto en cualquier corte
+    // (aunque hoy tenga 0 órdenes y 0 técnicos) sigue siendo asignable.
+    for (const [ck, innerCatalogo] of catalogoBarrios) {
+      let inner = mapa.get(ck)
+      if (!inner) {
+        inner = new Map<string, string>()
+        mapa.set(ck, inner)
+      }
+      for (const [bk, nombre] of innerCatalogo) {
+        if (!inner.has(bk)) inner.set(bk, nombre)
+      }
+    }
     // Cold start: barrios oficiales de la ciudad aunque no haya datos aún.
     for (const ciudad of todasLasCiudades) {
       const canonica = ciudadCanonica(ciudad)
@@ -271,7 +300,7 @@ export function DetalleTecnicoTerritorio({
       }
     }
     return mapa
-  }, [reglas, servicios, todasLasCiudades])
+  }, [reglas, servicios, todasLasCiudades, catalogoBarrios])
 
   // Dueño general actual por barrio (reglas P2 de OTROS técnicos), para avisar.
   const duenoGeneralAjeno = useMemo(() => {
