@@ -78,7 +78,8 @@ export function RadiografiaTecnico({
   notificar,
 }: RadiografiaTecnicoProps) {
   const [serviciosFiltro, setServiciosFiltro] = useState<string[]>([])
-  const [modoVista, setModoVista] = useState<ModoVista>('barrios')
+  // Por defecto se abre la lista completa de órdenes (no el acordeón por barrios).
+  const [modoVista, setModoVista] = useState<ModoVista>('lista')
   const [orden, setOrden] = useState<OrdenState>({ columna: 'dias', direccion: 'desc' })
   const [pagina, setPagina] = useState(1)
   const [generandoPdf, setGenerandoPdf] = useState(false)
@@ -773,16 +774,6 @@ export function RadiografiaTecnico({
       <div className="mb-4 flex gap-1 rounded-lg bg-white/5 p-1 ring-1 ring-white/10">
         <button
           type="button"
-          onClick={() => setModoVista('barrios')}
-          className={cn(
-            'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
-            modoVista === 'barrios' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200',
-          )}
-        >
-          <Home className="size-3.5" /> Por Barrios
-        </button>
-        <button
-          type="button"
           onClick={() => setModoVista('lista')}
           className={cn(
             'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
@@ -790,6 +781,16 @@ export function RadiografiaTecnico({
           )}
         >
           <List className="size-3.5" /> Todas las Órdenes
+        </button>
+        <button
+          type="button"
+          onClick={() => setModoVista('barrios')}
+          className={cn(
+            'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
+            modoVista === 'barrios' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-slate-200',
+          )}
+        >
+          <Home className="size-3.5" /> Por Barrios
         </button>
       </div>
 
