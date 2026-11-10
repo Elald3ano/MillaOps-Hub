@@ -360,11 +360,13 @@ export function RadiografiaTecnico({
         '../../services/pdfGenerator'
       )
       // Las patrullas solo agrupan: no tienen órdenes propias, se excluyen del PDF.
+      // Se usa `ordenados` (array COMPLETO con el orden de columnas de la tabla),
+      // no `serviciosFiltrados` ni `visibles` (que solo contiene la página actual).
       const grupos = tecnicos
         .filter((t) => t.rol !== 'patrulla')
         .map((t) => ({
           tecnico: t,
-          servicios: serviciosFiltrados.filter((s) =>
+          servicios: ordenados.filter((s) =>
             t.id === 'sin_asignar' ? s.tecnico_id === null : s.tecnico_id === t.id,
           ),
         }))
