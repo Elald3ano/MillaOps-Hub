@@ -37,6 +37,10 @@ export interface Servicio {
   referencia_pago?: string // ← columna Sigma "Referencia de pago"
   identificacion?: string // ← columna Sigma "Identificación"
   estado_sigma?: string // ← columna Sigma "Estado en Sigma"
+  /** Técnico que reporta Sigma (informativo; el motor asigna tecnico_id). */
+  tecnico_sigma?: string
+  /** Fecha de cierre reportada por Sigma (solo órdenes cerradas). */
+  fecha_cierre?: string
   fecha_creacion: string // ← columna Sigma "Fecha de creación"
   dias_antiguedad: number // ← columna Sigma "Días abierta" (fallback a cálculo)
   tecnico_id: string | null // asignado por el motor de cascada

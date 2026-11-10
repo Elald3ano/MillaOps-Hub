@@ -16,6 +16,8 @@ import { AlertasRendimiento } from './AlertasRendimiento'
 
 interface AuditoriaCierresDashboardProps {
   serviciosActivos: Servicio[]
+  // Órdenes cerradas del último reporte (solo memoria; reservado para futuras vistas).
+  serviciosCerrados?: ServicioNuevo[]
   reglas: ReglaConTecnico[]
   notificar: (mensaje: string, variant?: ToastVariant) => void
   // Estado levantado a App para persistir entre pestañas.

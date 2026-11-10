@@ -15,6 +15,8 @@ type CampoExcel =
   | 'referencia_pago'
   | 'identificacion'
   | 'estado_sigma'
+  | 'tecnico_sigma'
+  | 'fecha_cierre'
   | 'fecha_creacion'
   | 'dias_antiguedad'
 
@@ -80,8 +82,18 @@ function mapearColumna(clave: string): CampoExcel | null {
   if (clave === 'identificacion' || clave === 'cedula') return 'identificacion'
   // estado_sigma ← "Estado en Sigma" | "Estado"
   if (clave === 'estadoensigma' || clave === 'estado') return 'estado_sigma'
+  // tecnico_sigma ← "Técnico" (informativo; NO confundir con "¿De dónde sale el técnico?").
+  if (clave === 'tecnico' || clave === 'tecnicotecnico') return 'tecnico_sigma'
   // dias_antiguedad ← "Días abierta"
   if (clave.includes('diasabiert') || clave === 'antiguedad') return 'dias_antiguedad'
+  // fecha_cierre ← "Fecha de cierre" y variantes (debe ir ANTES de fecha_creacion)
+  if (
+    clave.includes('fechacierre') ||
+    clave.includes('fechadecierre') ||
+    clave === 'cierrefecha'
+  ) {
+    return 'fecha_cierre'
+  }
   // fecha_creacion ← "Fecha de creación" y variantes
   if (
     clave === 'fecha' ||
@@ -184,19 +196,30 @@ function seleccionarHoja(workbook: XLSX.WorkBook): XLSX.WorkSheet | null {
   return workbook.Sheets[nombres[0]] ?? null
 }
 
+export type EstadoSigmaNormalizado = 'abierta' | 'cerrada' | 'desconocida'
+
+/** Clasifica el texto de "Estado en Sigma" (insensible a mayúsculas/espacios). */
+export function clasificarEstadoSigma(estado: string | undefined): EstadoSigmaNormalizado {
+  const clave = normalizarClave(estado ?? '')
+  if (!clave) return 'abierta' // vacío ⇒ retrocompatible: se trata como abierta
+  if (clave === 'cerrada' || clave === 'cerrado') return 'cerrada'
+  if (clave === 'nueva' || clave === 'pendiente') return 'abierta'
+  return 'desconocida'
+}
+
 /**
- * Lee un archivo Excel (.xlsx/.xls) y lo transforma en servicios listos para
- * asignar. Devuelve servicios con `estado: 'ABIERTO'` y `tecnico_id: null`.
+ * Recorre las filas del reporte Sigma y construye TODOS los servicios (abiertos
+ * y cerrados) sin clasificarlos. Es la base compartida por las API públicas.
  */
-export async function parseServiciosExcel(
+async function parseServiciosInterno(
   file: File,
   ciudadFiltro?: string,
-): Promise<ServicioNuevo[]> {
+): Promise<{ servicios: ServicioNuevo[]; descartadas: number }> {
   const buffer = await file.arrayBuffer()
   const workbook = XLSX.read(buffer, { type: 'array' })
 
   const hoja = seleccionarHoja(workbook)
-  if (!hoja) return []
+  if (!hoja) return { servicios: [], descartadas: 0 }
 
   const filas = XLSX.utils.sheet_to_json<unknown[]>(hoja, {
     header: 1,
@@ -205,7 +228,7 @@ export async function parseServiciosExcel(
     blankrows: false,
   })
 
-  if (filas.length === 0) return []
+  if (filas.length === 0) return { servicios: [], descartadas: 0 }
 
   const encabezados = filas[0] ?? []
 
@@ -240,6 +263,7 @@ export async function parseServiciosExcel(
     const referenciaPago = obtenerTexto(fila, indicePorCampo.get('referencia_pago'))
     const identificacion = obtenerTexto(fila, indicePorCampo.get('identificacion'))
     const estadoSigma = obtenerTexto(fila, indicePorCampo.get('estado_sigma'))
+    const tecnicoSigma = obtenerTexto(fila, indicePorCampo.get('tecnico_sigma'))
 
     // Ignorar filas sin datos mínimos
     if (!numeroOrden || !ciudad || !barrio || !tipoServicio) continue
@@ -256,6 +280,8 @@ export async function parseServiciosExcel(
     const fechaCreacion = parsearFecha(obtenerValor(fila, indicePorCampo.get('fecha_creacion')))
     if (!fechaCreacion) continue
 
+    const fechaCierre = parsearFecha(obtenerValor(fila, indicePorCampo.get('fecha_cierre')))
+
     // "Días abierta": se lee directo si es número; si no, se calcula desde la fecha.
     const diasDesdeExcel = parsearDias(obtenerValor(fila, indicePorCampo.get('dias_antiguedad')))
     const diasAntiguedad = diasDesdeExcel ?? differenceInCalendarDays(new Date(), fechaCreacion)
@@ -271,6 +297,8 @@ export async function parseServiciosExcel(
       referencia_pago: referenciaPago || undefined,
       identificacion: identificacion || undefined,
       estado_sigma: estadoSigma || undefined,
+      tecnico_sigma: tecnicoSigma || undefined,
+      fecha_cierre: fechaCierre ? fechaCierre.toISOString() : undefined,
       fecha_creacion: fechaCreacion.toISOString(),
       dias_antiguedad: diasAntiguedad,
       tecnico_id: null,
@@ -278,11 +306,57 @@ export async function parseServiciosExcel(
     })
   }
 
+  return { servicios, descartadas }
+}
+
+export interface ParseoSigma {
+  abiertos: ServicioNuevo[]
+  cerrados: ServicioNuevo[]
+}
+
+/**
+ * Lee un reporte Sigma y bifurca las órdenes según `Estado en Sigma`:
+ * las cerradas van a `cerrados` (solo auditoría) y el resto a `abiertos`.
+ *
+ * Un estado vacío/desconocido se trata como abierto para no perder datos.
+ */
+export async function parseServiciosSigma(
+  file: File,
+  ciudadFiltro?: string,
+): Promise<ParseoSigma> {
+  const { servicios, descartadas } = await parseServiciosInterno(file, ciudadFiltro)
+
+  const abiertos: ServicioNuevo[] = []
+  const cerrados: ServicioNuevo[] = []
+
+  for (const servicio of servicios) {
+    if (clasificarEstadoSigma(servicio.estado_sigma) === 'cerrada') {
+      cerrados.push(servicio)
+    } else {
+      abiertos.push(servicio)
+    }
+  }
+
   console.log(
-    `[Parser] Órdenes leídas de tu zona: ${servicios.length} | Descartadas de otras zonas: ${descartadas}`,
+    `[Parser] Órdenes leídas de tu zona: ${servicios.length} | Descartadas de otras zonas: ${descartadas} | Abiertas: ${abiertos.length} | Cerradas: ${cerrados.length}`,
   )
 
-  return servicios
+  return { abiertos, cerrados }
+}
+
+/**
+ * Lee un archivo Excel (.xlsx/.xls) y lo transforma en servicios listos para
+ * asignar. Devuelve servicios con `estado: 'ABIERTO'` y `tecnico_id: null`.
+ *
+ * Retrocompatible: concatena abiertos + cerrados para los llamadores que
+ * necesitan el universo completo (p. ej. la auditoría de cierres).
+ */
+export async function parseServiciosExcel(
+  file: File,
+  ciudadFiltro?: string,
+): Promise<ServicioNuevo[]> {
+  const { abiertos, cerrados } = await parseServiciosSigma(file, ciudadFiltro)
+  return [...abiertos, ...cerrados]
 }
 
 // ---- Parseo de la matriz de asignación (importación masiva) ----

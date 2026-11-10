@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BarChart3, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, TrendingUp, WifiOff } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
-import { DirectorioTecnicos } from './components/territorio/DirectorioTecnicos'
 import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
+import { DirectorioTecnicos } from './components/territorio/DirectorioTecnicos'
 import { AnaliticaDashboard } from './components/analitica/AnaliticaDashboard'
 import { AuditoriaCierresDashboard } from './components/cierres/AuditoriaCierresDashboard'
 import { ToastContainer, type Toast, type ToastVariant } from './components/ToastContainer'
@@ -19,7 +19,7 @@ import {
   reasignarServiciosActivos,
   reemplazarServiciosActivos,
 } from './services/supabaseService'
-import type { ReglaConTecnico, Servicio, Tecnico } from './types'
+import type { ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
 import type { ResultadoCierres } from './services/reconciliationService'
 import { cn } from './lib/utils'
 
@@ -33,6 +33,8 @@ function App() {
   const [tecnicos, setTecnicos] = useState<Tecnico[]>([])
   const [reglas, setReglas] = useState<ReglaConTecnico[]>([])
   const [serviciosActivos, setServiciosActivos] = useState<Servicio[]>([])
+  // Órdenes cerradas del último reporte: solo en memoria, para auditoría.
+  const [serviciosCerrados, setServiciosCerrados] = useState<ServicioNuevo[]>([])
 
   // UI
   const [cargando, setCargando] = useState(true)
@@ -199,10 +201,11 @@ function App() {
       const nombre = `${file.name.replace(/\.(xlsx|xls)$/i, '')} — ${format(new Date(), 'dd MMM yyyy HH:mm', { locale: es })}`
 
       try {
-        // 1. Parseo del Excel (carga diferida: xlsx es un chunk pesado)
-        const { parseServiciosExcel } = await import('./services/excelParser')
-        const nuevos = await parseServiciosExcel(file, ciudadFiltro)
-        if (nuevos.length === 0) {
+        // 1. Parseo del Excel con bifurcación abiertas/cerradas (xlsx diferido).
+        const { parseServiciosSigma } = await import('./services/excelParser')
+        const { abiertos, cerrados } = await parseServiciosSigma(file, ciudadFiltro)
+
+        if (abiertos.length === 0 && cerrados.length === 0) {
           notificar(
             ciudadFiltro
               ? `No se encontraron servicios para la ciudad "${ciudadFiltro}".`
@@ -212,6 +215,16 @@ function App() {
           return false
         }
 
+        // Solo hay cerradas: se conservan para auditoría sin tocar Supabase.
+        if (abiertos.length === 0) {
+          setServiciosCerrados(cerrados)
+          notificar(
+            `El archivo solo contiene órdenes cerradas: ${cerrados.length} registradas para auditoría.`,
+            'info',
+          )
+          return true
+        }
+
         // 2. Reglas territoriales activas (si el estado local está vacío, se consulta).
         let reglasActivas = reglas
         if (reglasActivas.length === 0) {
@@ -219,18 +232,21 @@ function App() {
         }
         console.log(`[Asignacion] Reglas activas disponibles: ${reglasActivas.length}`)
 
-        // 3. Asignación directa con la matriz.
-        const asignados = aplicarMatrizAsignacion(nuevos, reglasActivas)
+        // 3. Asignación directa con la matriz (solo órdenes abiertas).
+        const asignados = aplicarMatrizAsignacion(abiertos, reglasActivas)
 
-        // 4. Reemplazar el despacho activo en Supabase.
+        // 4. Reemplazar el despacho activo en Supabase (solo abiertas).
         await reemplazarServiciosActivos(nombre, asignados)
 
-        // 5. Refrescar el estado con los servicios persistidos (ids reales).
+        // 5. Las cerradas quedan únicamente en memoria para la auditoría.
+        setServiciosCerrados(cerrados)
+
+        // 6. Refrescar el estado con los servicios persistidos (ids reales).
         await cargarDatos(true)
 
         const asignadosCount = asignados.filter((s) => s.tecnico_id !== null).length
         notificar(
-          `Despacho listo: ${asignados.length} órdenes (${asignadosCount} asignadas).`,
+          `Despacho listo: ${asignados.length} órdenes abiertas (${asignadosCount} asignadas) · ${cerrados.length} cerradas en auditoría.`,
           'success',
         )
         return true
@@ -422,6 +438,7 @@ function App() {
             ) : vistaActiva === 'cierres' ? (
               <AuditoriaCierresDashboard
                 serviciosActivos={serviciosActivos}
+                serviciosCerrados={serviciosCerrados}
                 reglas={reglas}
                 notificar={notificar}
                 resultado={resultadoCierres}

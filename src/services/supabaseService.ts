@@ -321,7 +321,27 @@ export async function reemplazarServiciosActivos(
 
   // 3. Insertar servicios en chunks.
   for (const chunk of chunkArray(servicios, TAMANO_LOTE_INSERCION)) {
-    const filas = chunk.map((servicio) => ({ ...servicio, lote_id: lote.id }))
+    // Se construyen explícitamente solo las columnas de la tabla: `tecnico_sigma`
+    // y `fecha_cierre` son informativos del reporte y NO existen en `servicios`.
+    const filas: Database['public']['Tables']['servicios']['Insert'][] = chunk.map(
+      (servicio) => ({
+        lote_id: lote.id,
+        numero_orden: servicio.numero_orden,
+        ciudad: servicio.ciudad,
+        barrio: servicio.barrio,
+        direccion: servicio.direccion ?? null,
+        tipo_servicio: servicio.tipo_servicio,
+        nombre_cliente: servicio.nombre_cliente ?? null,
+        telefono_cliente: servicio.telefono_cliente ?? null,
+        referencia_pago: servicio.referencia_pago ?? null,
+        identificacion: servicio.identificacion ?? null,
+        estado_sigma: servicio.estado_sigma ?? null,
+        fecha_creacion: servicio.fecha_creacion,
+        dias_antiguedad: servicio.dias_antiguedad,
+        tecnico_id: servicio.tecnico_id,
+        estado: servicio.estado,
+      }),
+    )
     const { error } = await supabase.from('servicios').insert(filas)
     if (error) throw new Error(`Error al insertar servicios: ${error.message}`)
   }

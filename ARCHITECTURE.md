@@ -191,10 +191,32 @@ Se aplica en `parseServiciosExcel` (ingesta) y en `getServiciosActivos` (lectura
 
 ### 2.2 Parser de Excel — `src/services/excelParser.ts`
 
-`parseServiciosExcel(file, ciudadFiltro?)` lee un reporte Sigma y produce `ServicioNuevo[]`.
-Pipeline: selección de hoja (prioriza la que contenga `"servicio"`) → mapeo de encabezados
-(normalizados NFD) → descarte por jurisdicción → cálculo de antigüedad. Columnas requeridas:
-`numero_orden`, `ciudad`, `barrio`, `tipo_servicio`, `fecha_creacion`.
+Lee el reporte Sigma (formato maestro unificado de **15 columnas**) y produce `ServicioNuevo[]`.
+
+Columnas mapeadas: `Sucursal`→`ciudad` · `Tipo de solicitud`→`tipo_servicio` ·
+`Servicio`→`numero_orden` · `Referencia de pago` · `Nombre`→`nombre_cliente` · `Identificación` ·
+`Dirección` · `Barrio` · `Teléfono` · `Días abierta`→`dias_antiguedad` · `Fecha de creación` ·
+`Estado en Sigma` · `Fecha de cierre`→`fecha_cierre` · `Técnico`→`tecnico_sigma`.
+La columna `¿De dónde sale el técnico?` se ignora a propósito.
+
+#### Bifurcación abiertas / cerradas
+
+`parseServiciosSigma(file, ciudadFiltro?)` devuelve `{ abiertos, cerrados }` clasificando por
+`Estado en Sigma` con `clasificarEstadoSigma` (insensible a mayúsculas/espacios):
+
+| Estado en Sigma | Destino |
+|---|---|
+| `Nueva`, `Pendiente`, vacío o desconocido | **abiertos** → despacho activo (Supabase) |
+| `Cerrada` / `Cerrado` | **cerrados** → solo memoria React (`serviciosCerrados`) |
+
+- Las órdenes **cerradas NO se persisten en Supabase**: viven solo en `serviciosCerrados` para no
+  consumir la cuota de 500 MB. Se pierden al recargar (la analítica es reactiva en cliente).
+- `tecnico_sigma` es **informativo**: el motor de asignación territorial sigue calculando
+  `tecnico_id` vía matriz P1/P2. Para las cerradas, la columna `Técnico` identifica quién liquidó.
+- El insert de `reemplazarServiciosActivos` construye explícitamente las columnas de la tabla y
+  **excluye** `tecnico_sigma` y `fecha_cierre` (no existen en el esquema de `servicios`).
+- `parseServiciosExcel(file, ciudadFiltro?)` se conserva como wrapper retrocompatible que devuelve
+  `[...abiertos, ...cerrados]`, usado por la Auditoría de Cierres (necesita el universo completo).
 
 ### 2.3 Normalizador y Motor de Asignación
 
