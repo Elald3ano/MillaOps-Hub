@@ -34,12 +34,36 @@ interface ResumenTecnico {
   ciudadesTexto: string
   /** Ciudad con más órdenes del técnico (clave canónica); confina la selección. */
   ciudadPrincipal: string
+  /** Conteo de órdenes por ciudad canónica (usado para agregar patrullas). */
+  conteoCiudades: Map<string, number>
 }
 
 interface TecnicoSinOrdenes {
   tecnico: Tecnico
   ciudadesTexto: string
 }
+
+/** Unidad rankeable del ranking: patrulla (con sus operadores) u operador suelto. */
+type UnidadRanking =
+  | {
+      tipo: 'patrulla'
+      clave: string
+      patrulla: Tecnico
+      operadores: ResumenTecnico[]
+      total: number
+      livianos: number
+      pesados: number
+      carga: Carga
+      ciudadesTexto: string
+      ciudadPrincipal: string
+    }
+  | {
+      tipo: 'operador'
+      clave: string
+      resumen: ResumenTecnico
+      total: number
+      carga: Carga
+    }
 
 interface TecnicoEnCiudad {
   tecnicoId: string
@@ -338,8 +362,8 @@ export function BalanceCuadrillas({
       .sort((a, b) => (a.total - b.total) * factor)
   }, [servicios, tecnicosPorId, direccionOrden])
 
-  // Ranking plano por técnico (vista "tecnicos").
-  const { ranking, sinOrdenes } = useMemo(() => {
+  // Ranking jerárquico: patrullas (con sus operadores) y operadores sueltos.
+  const { unidades, sinOrdenes } = useMemo(() => {
     const factor = direccionOrden === 'asc' ? 1 : -1
     const acumulado = new Map<
       string,
@@ -376,17 +400,130 @@ export function BalanceCuadrillas({
       acumulado.set(s.tecnico_id, prev)
     }
 
-    const ranking: ResumenTecnico[] = [...acumulado.values()]
-      .map((r) => ({
-        tecnico: r.tecnico,
-        total: r.total,
-        livianos: r.livianos,
-        pesados: r.pesados,
-        carga: clasificarCarga(r.total),
-        ciudadesTexto: formatearCiudades(r.ciudades, ciudadesActivas[r.tecnico.id]),
-        ciudadPrincipal: ciudadPrincipalDe(r.conteoCiudades),
-      }))
-      .sort((a, b) => (a.total - b.total) * factor)
+    const porTecnico = new Map<string, ResumenTecnico>(
+      [...acumulado.values()].map((r) => [
+        r.tecnico.id,
+        {
+          tecnico: r.tecnico,
+          total: r.total,
+          livianos: r.livianos,
+          pesados: r.pesados,
+          carga: clasificarCarga(r.total),
+          ciudadesTexto: formatearCiudades(r.ciudades, ciudadesActivas[r.tecnico.id]),
+          ciudadPrincipal: ciudadPrincipalDe(r.conteoCiudades),
+          conteoCiudades: r.conteoCiudades,
+        },
+      ]),
+    )
+
+    // --- Jerarquía Patrulla → Operadores (mismas reglas que la vista por sucursal) ---
+    // Los operadores entran en la lista de SU patrulla aunque no tengan órdenes,
+    // para que el desglose no esconda huecos de cobertura.
+    const operadoresPorPatrulla = new Map<string, ResumenTecnico[]>()
+    // Toda patrulla válida se registra, tenga o no operadores: así conserva su
+    // identidad 🚛 y sus órdenes propias no caen en la lista de sueltos.
+    const patrullasValidas = new Set<string>()
+    for (const t of tecnicos) {
+      const patrullaId = t.patrulla_id
+      if (!patrullaId) continue
+      const patrulla = tecnicosPorId.get(patrullaId)
+      if (patrulla?.rol !== 'patrulla') continue
+      patrullasValidas.add(patrullaId)
+      const lista = operadoresPorPatrulla.get(patrullaId) ?? []
+      const resumen = porTecnico.get(t.id) ?? {
+        tecnico: t,
+        total: 0,
+        livianos: 0,
+        pesados: 0,
+        carga: 'normal' as Carga,
+        ciudadesTexto: formatearCiudades(new Set<string>(), ciudadesActivas[t.id]),
+        ciudadPrincipal: SIN_CIUDAD,
+        conteoCiudades: new Map<string, number>(),
+      }
+      lista.push({ ...resumen, carga: clasificarCarga(resumen.total) })
+      operadoresPorPatrulla.set(patrullaId, lista)
+    }
+    // Patrullas sin operadores pero con órdenes propias (P2).
+    for (const t of tecnicos) {
+      if (t.rol !== 'patrulla') continue
+      if (!porTecnico.has(t.id)) continue
+      patrullasValidas.add(t.id)
+    }
+
+    // Carga efectiva por patrulla: los despachos de sus operadores cuentan una
+    // sola vez, aunque el operador aparezca como fila propia con rol 'patrulla'.
+    const efectivaPorPatrulla = new Map<string, ResumenTecnico>()
+    for (const patrullaId of patrullasValidas) {
+      const operadores = operadoresPorPatrulla.get(patrullaId) ?? []
+      const propio = porTecnico.get(patrullaId)
+      const ciudades = new Map<string, number>()
+      const contarCiudades = (resumen: ResumenTecnico | undefined) => {
+        if (!resumen) return
+        for (const [ciudad, cantidad] of resumen.conteoCiudades) {
+          ciudades.set(ciudad, (ciudades.get(ciudad) ?? 0) + cantidad)
+        }
+      }
+      // Órdenes propias de la patrulla (P2, asignación directa del carro dueño de
+      // barrio) se suman SIEMPRE a las de sus operadores (P1, flotantes), igual que
+      // en la vista por sucursal. No hay doble conteo: cada servicio tiene un único
+      // `tecnico_id`.
+      if (propio) contarCiudades(propio)
+      for (const o of operadores) contarCiudades(o)
+      const sumaOperadores = operadores.reduce((acc, o) => acc + o.total, 0)
+      const total = sumaOperadores + (propio?.total ?? 0)
+      const livianos =
+        operadores.reduce((acc, o) => acc + o.livianos, 0) + (propio?.livianos ?? 0)
+      const pesados = operadores.reduce((acc, o) => acc + o.pesados, 0) + (propio?.pesados ?? 0)
+      const patrulla = tecnicosPorId.get(patrullaId)
+      if (!patrulla) continue
+      efectivaPorPatrulla.set(patrullaId, {
+        tecnico: patrulla,
+        total,
+        livianos,
+        pesados,
+        carga: clasificarCarga(total),
+        ciudadesTexto: [...ciudades.keys()].sort((a, b) => a.localeCompare(b)).join(', '),
+        ciudadPrincipal: ciudadPrincipalDe(ciudades),
+        conteoCiudades: ciudades,
+      })
+    }
+
+    const unidades: UnidadRanking[] = []
+    const operadoresConsumidos = new Set<string>()
+
+    for (const [patrullaId, efectiva] of efectivaPorPatrulla) {
+      const operadores = [...(operadoresPorPatrulla.get(patrullaId) ?? [])].sort(
+        (a, b) => (a.total - b.total) * factor,
+      )
+      for (const o of operadores) operadoresConsumidos.add(o.tecnico.id)
+      operadoresConsumidos.add(patrullaId)
+      unidades.push({
+        tipo: 'patrulla',
+        clave: `patrulla:${patrullaId}`,
+        patrulla: efectiva.tecnico,
+        operadores,
+        total: efectiva.total,
+        livianos: efectiva.livianos,
+        pesados: efectiva.pesados,
+        carga: efectiva.carga,
+        ciudadesTexto: efectiva.ciudadesTexto,
+        ciudadPrincipal: efectiva.ciudadPrincipal,
+      })
+    }
+
+    // Todo técnico con carga que no pertenece a una patrulla válida compite solo.
+    for (const resumen of porTecnico.values()) {
+      if (operadoresConsumidos.has(resumen.tecnico.id)) continue
+      unidades.push({
+        tipo: 'operador',
+        clave: `operador:${resumen.tecnico.id}`,
+        resumen,
+        total: resumen.total,
+        carga: resumen.carga,
+      })
+    }
+
+    unidades.sort((a, b) => (a.total - b.total) * factor)
 
     const asignadosIds = new Set(acumulado.keys())
     const sinOrdenes: TecnicoSinOrdenes[] = tecnicos
@@ -396,8 +533,17 @@ export function BalanceCuadrillas({
         ciudadesTexto: formatearCiudades(new Set<string>(), ciudadesActivas[t.id]),
       }))
 
-    return { ranking, sinOrdenes }
+    return { unidades, sinOrdenes }
   }, [servicios, tecnicos, ciudadesActivas, tecnicosPorId, direccionOrden])
+
+  /** Técnicos con carga: operadores sueltos + operadores dentro de patrullas. */
+  const tecnicosConCarga = useMemo(() => {
+    let total = 0
+    for (const u of unidades) {
+      total += u.tipo === 'patrulla' ? u.operadores.length : 1
+    }
+    return total
+  }, [unidades])
 
   // Todas las ciudades comienzan colapsadas por defecto.
   const [sucursalExpandida, setSucursalExpandida] = useState<string | null>(null)
@@ -421,7 +567,7 @@ export function BalanceCuadrillas({
     <TarjetaAnalitica
       icon={Users}
       titulo="Balance y Saturación de Cuadrillas"
-      subtitulo={`${resumenCiudades.length} sucursales · ${ranking.length} técnicos`}
+      subtitulo={`${resumenCiudades.length} sucursales · ${tecnicosConCarga} técnicos`}
       accion={
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {tecnicosSeleccionadosIds.length > 0 && (
@@ -737,9 +883,9 @@ export function BalanceCuadrillas({
           )}
         </div>
       ) : (
-        /* ---- Vista por técnico (ranking plano) ---- */
+        /* ---- Vista por técnico (ranking jerárquico) ---- */
         <div>
-          {ranking.length === 0 && totalSinAsignar === 0 ? (
+          {unidades.length === 0 && totalSinAsignar === 0 ? (
             <p className="text-xs text-slate-400">Sin órdenes en el ámbito seleccionado.</p>
           ) : (
             <ul className="space-y-1.5">
@@ -775,68 +921,212 @@ export function BalanceCuadrillas({
                   </button>
                 </li>
               )}
-              {ranking.map((r) => {
-                const cfg = CARGA_CONFIG[r.carga]
-                const seleccionado = tecnicosSeleccionadosIds.includes(r.tecnico.id)
+              {unidades.map((u) => {
+                if (u.tipo === 'operador') {
+                  const r = u.resumen
+                  const cfg = CARGA_CONFIG[r.carga]
+                  const seleccionado = tecnicosSeleccionadosIds.includes(r.tecnico.id)
+                  return (
+                    <li key={u.clave}>
+                      <button
+                        type="button"
+                        onClick={() => onToggleTecnico(r.tecnico.id, r.ciudadPrincipal)}
+                        aria-pressed={seleccionado}
+                        className={cn(
+                          'w-full rounded-xl px-3 py-2 text-left transition-all',
+                          seleccionado
+                            ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
+                            : 'cursor-pointer hover:bg-slate-800/60',
+                        )}
+                      >
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span
+                              className={cn(
+                                'flex size-4 shrink-0 items-center justify-center rounded border transition',
+                                seleccionado
+                                  ? 'border-cyan-400 bg-cyan-600'
+                                  : 'border-slate-600 bg-slate-950',
+                              )}
+                            >
+                              {seleccionado && (
+                                <Check className="size-3 text-white" strokeWidth={3} />
+                              )}
+                            </span>
+                            <span className="truncate text-sm font-medium text-slate-200">
+                              {r.tecnico.nombre}
+                            </span>
+                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-200 ring-1 ring-emerald-500/30">
+                              🛵 Operador
+                            </span>
+                            {r.carga === 'saturado' && (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold text-red-300 ring-1 ring-red-500/30">
+                                <AlertTriangle className="size-3" /> Sobrecargado
+                              </span>
+                            )}
+                          </div>
+                          <span className={cn('text-sm font-bold tabular-nums', cfg.texto)}>
+                            {r.total}
+                          </span>
+                        </div>
+                        <div className="mb-1 flex items-center gap-1.5 text-[11px] text-slate-400">
+                          <MapPin className="size-3 shrink-0 text-cyan-400" />
+                          <span className="truncate">
+                            {r.ciudadesTexto || 'Sin ciudad asignada'} · {r.livianos} liviano ·{' '}
+                            {r.pesados} pesado
+                          </span>
+                        </div>
+                        <BarraProgreso valor={r.total / REF_SATURACION} color={cfg.barra} />
+                      </button>
+                    </li>
+                  )
+                }
+
+                const cfg = CARGA_CONFIG[u.carga]
+                const desplegada = patrullasExpandidas.has(u.patrulla.id)
+                const seleccionada = tecnicosSeleccionadosIds.includes(u.patrulla.id)
                 return (
-                  <li key={r.tecnico.id}>
-                    <button
-                      type="button"
-                      onClick={() => onToggleTecnico(r.tecnico.id, r.ciudadPrincipal)}
-                      aria-pressed={seleccionado}
-                      className={cn(
-                        'w-full rounded-xl px-3 py-2 text-left transition-all',
-                        seleccionado
-                          ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
-                          : 'cursor-pointer hover:bg-slate-800/60',
-                      )}
-                    >
-                      <div className="mb-1 flex items-center justify-between gap-2">
-                        <div className="flex min-w-0 items-center gap-2">
+                  <li key={u.clave}>
+                    <div className="rounded-xl bg-white/[0.03] px-2 py-2 ring-1 ring-white/10">
+                      <div className="flex items-start gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => onTogglePatrulla(u.patrulla.id, u.ciudadPrincipal)}
+                          aria-pressed={seleccionada}
+                          aria-label={`Seleccionar patrulla ${u.patrulla.nombre}`}
+                          className="mt-0.5 shrink-0 cursor-pointer rounded p-0.5 transition hover:bg-white/10"
+                        >
                           <span
                             className={cn(
                               'flex size-4 shrink-0 items-center justify-center rounded border transition',
-                              seleccionado
+                              seleccionada
                                 ? 'border-cyan-400 bg-cyan-600'
                                 : 'border-slate-600 bg-slate-950',
                             )}
                           >
-                            {seleccionado && (
+                            {seleccionada && (
                               <Check className="size-3 text-white" strokeWidth={3} />
                             )}
                           </span>
-                          <span className="truncate text-sm font-medium text-slate-200">
-                            {r.tecnico.nombre}
-                          </span>
-                          {r.tecnico.rol === 'patrulla' && (
-                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-200 ring-1 ring-cyan-500/30">
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => togglePatrullaExpandida(u.patrulla.id)}
+                          aria-expanded={desplegada}
+                          className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 text-left"
+                        >
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            {desplegada ? (
+                              <ChevronDown className="size-3.5 shrink-0 text-slate-400" />
+                            ) : (
+                              <ChevronRight className="size-3.5 shrink-0 text-slate-400" />
+                            )}
+                            <Truck className="size-3.5 shrink-0 text-cyan-300" />
+                            <span className="truncate text-sm font-medium text-slate-200">
+                              {u.patrulla.nombre}
+                            </span>
+                            <span className="shrink-0 text-[10px] font-semibold tracking-wide text-indigo-300 uppercase">
                               🚛 Patrulla
                             </span>
-                          )}
-                          {r.tecnico.rol === 'operador' && (
-                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-200 ring-1 ring-emerald-500/30">
-                              🛵 Operador
+                            <span className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-slate-300 ring-1 ring-white/15">
+                              {u.operadores.length}{' '}
+                              {u.operadores.length === 1 ? 'operador' : 'operadores'}
                             </span>
-                          )}
-                          {r.carga === 'saturado' && (
-                            <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold text-red-300 ring-1 ring-red-500/30">
-                              <AlertTriangle className="size-3" /> Sobrecargado
-                            </span>
-                          )}
-                        </div>
-                        <span className={cn('text-sm font-bold tabular-nums', cfg.texto)}>
-                          {r.total}
-                        </span>
+                            {u.carga === 'saturado' && (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold text-red-300 ring-1 ring-red-500/30">
+                                <AlertTriangle className="size-3" /> Sobrecargado
+                              </span>
+                            )}
+                          </span>
+                          <span className={cn('shrink-0 text-sm font-bold tabular-nums', cfg.texto)}>
+                            {u.total}
+                          </span>
+                        </button>
                       </div>
-                      <div className="mb-1 flex items-center gap-1.5 text-[11px] text-slate-400">
-                        <MapPin className="size-3 shrink-0 text-cyan-400" />
-                        <span className="truncate">
-                          {r.ciudadesTexto || 'Sin ciudad asignada'} · {r.livianos} liviano ·{' '}
-                          {r.pesados} pesado
-                        </span>
+                      <div className="mt-1 pl-6">
+                        <p className="mb-1 flex items-center gap-1.5 text-[11px] text-slate-400">
+                          <MapPin className="size-3 shrink-0 text-cyan-400" />
+                          <span className="truncate">
+                            {u.ciudadesTexto || 'Sin ciudad asignada'} · {u.livianos} liviano ·{' '}
+                            {u.pesados} pesado
+                          </span>
+                        </p>
+                        <BarraProgreso valor={u.total / REF_SATURACION} color={cfg.barra} />
                       </div>
-                      <BarraProgreso valor={r.total / REF_SATURACION} color={cfg.barra} />
-                    </button>
+
+                      {desplegada && (
+                        <ul className="mt-1.5 ml-4 space-y-1 border-l border-white/10 pl-2">
+                          {u.operadores.length === 0 ? (
+                            <li className="px-2.5 py-1 text-[11px] text-slate-500">
+                              Sin operadores a cargo.
+                            </li>
+                          ) : (
+                            u.operadores.map((o) => {
+                              const cfgOperador = CARGA_CONFIG[o.carga]
+                              const seleccionado = tecnicosSeleccionadosIds.includes(o.tecnico.id)
+                              return (
+                                <li key={o.tecnico.id}>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onToggleTecnico(o.tecnico.id, o.ciudadPrincipal)
+                                    }
+                                    aria-pressed={seleccionado}
+                                    className={cn(
+                                      'w-full rounded-lg px-2.5 py-1.5 text-left transition-all',
+                                      seleccionado
+                                        ? 'bg-cyan-500/10 ring-2 ring-cyan-400/70'
+                                        : 'cursor-pointer hover:bg-slate-800/60',
+                                    )}
+                                  >
+                                    <div className="mb-0.5 flex items-center justify-between gap-2">
+                                      <div className="flex min-w-0 items-center gap-2">
+                                        <span
+                                          className={cn(
+                                            'flex size-4 shrink-0 items-center justify-center rounded border transition',
+                                            seleccionado
+                                              ? 'border-cyan-400 bg-cyan-600'
+                                              : 'border-slate-600 bg-slate-950',
+                                          )}
+                                        >
+                                          {seleccionado && (
+                                            <Check
+                                              className="size-3 text-white"
+                                              strokeWidth={3}
+                                            />
+                                          )}
+                                        </span>
+                                        <span className="truncate text-sm font-medium text-slate-200">
+                                          {o.tecnico.nombre}
+                                        </span>
+                                      </div>
+                                      <span
+                                        className={cn(
+                                          'shrink-0 text-sm font-bold tabular-nums',
+                                          cfgOperador.texto,
+                                        )}
+                                      >
+                                        {o.total}
+                                      </span>
+                                    </div>
+                                    <p className="pl-6 text-[11px] text-slate-400">
+                                      {o.ciudadesTexto || 'Sin ciudad asignada'} · {o.livianos}{' '}
+                                      liviano · {o.pesados} pesado
+                                    </p>
+                                    <div className="mt-1 pl-6">
+                                      <BarraProgreso
+                                        valor={o.total / REF_SATURACION}
+                                        color={cfgOperador.barra}
+                                      />
+                                    </div>
+                                  </button>
+                                </li>
+                              )
+                            })
+                          )}
+                        </ul>
+                      )}
+                    </div>
                   </li>
                 )
               })}
