@@ -32,6 +32,8 @@ interface ResumenTecnico {
   pesados: number
   carga: Carga
   ciudadesTexto: string
+  /** Ciudad con más órdenes del técnico (clave canónica); confina la selección. */
+  ciudadPrincipal: string
 }
 
 interface TecnicoSinOrdenes {
@@ -81,6 +83,9 @@ const CARGA_CONFIG: Record<Carga, { barra: string; texto: string }> = {
   saturado: { barra: 'bg-red-500', texto: 'text-red-300' },
 }
 
+/** Etiqueta usada cuando una fila no expone una ciudad real. */
+const SIN_CIUDAD = 'Sin ciudad'
+
 /**
  * Ciudades únicas legibles: priman las de las órdenes asignadas; si no hay,
  * se usan las asignadas en la regla territorial (`tecnicos_ciudades`).
@@ -89,6 +94,19 @@ function formatearCiudades(deOrdenes: Set<string>, asignadas: string[] | undefin
   const origen = deOrdenes.size > 0 ? [...deOrdenes] : (asignadas ?? [])
   const unicas = [...new Set(origen.map((c) => c.trim()).filter(Boolean))]
   return unicas.sort((a, b) => a.localeCompare(b)).join(', ')
+}
+
+/** Ciudad con más órdenes para un técnico (clave canónica); fallback sin ciudad. */
+function ciudadPrincipalDe(conteo: Map<string, number>): string {
+  let principal = ''
+  let maximo = -1
+  for (const [ciudad, cantidad] of conteo) {
+    if (cantidad > maximo) {
+      principal = ciudad
+      maximo = cantidad
+    }
+  }
+  return principal || SIN_CIUDAD
 }
 
 /** Fila seleccionable de un técnico dentro de una ciudad. */
@@ -154,9 +172,11 @@ interface BalanceCuadrillasProps {
   tecnicos: Tecnico[]
   ciudadesActivas: Record<string, string[]>
   tecnicosSeleccionadosIds: string[]
+  /** Ciudad dueña de la selección actual; `null` cuando no hay selección. */
+  ciudadSeleccionada: string | null
   sinAsignarCiudadSeleccionada: string | null
-  onToggleTecnico: (id: string) => void
-  onTogglePatrulla: (id: string) => void
+  onToggleTecnico: (id: string, ciudad: string) => void
+  onTogglePatrulla: (id: string, ciudad: string) => void
   onSeleccionarSinAsignarCiudad: (ciudad: string) => void
   onSeleccionarTodosDeCiudad: (ciudad: string) => void
   onDeseleccionarTodosDeCiudad: (ciudad: string) => void
@@ -169,6 +189,7 @@ export function BalanceCuadrillas({
   tecnicos,
   ciudadesActivas,
   tecnicosSeleccionadosIds,
+  ciudadSeleccionada,
   sinAsignarCiudadSeleccionada,
   onToggleTecnico,
   onTogglePatrulla,
@@ -322,7 +343,14 @@ export function BalanceCuadrillas({
     const factor = direccionOrden === 'asc' ? 1 : -1
     const acumulado = new Map<
       string,
-      { tecnico: Tecnico; total: number; livianos: number; pesados: number; ciudades: Set<string> }
+      {
+        tecnico: Tecnico
+        total: number
+        livianos: number
+        pesados: number
+        ciudades: Set<string>
+        conteoCiudades: Map<string, number>
+      }
     >()
 
     for (const s of servicios) {
@@ -335,11 +363,16 @@ export function BalanceCuadrillas({
         livianos: 0,
         pesados: 0,
         ciudades: new Set<string>(),
+        conteoCiudades: new Map<string, number>(),
       }
       prev.total += 1
       if (esServicioLiviano(s.tipo_servicio)) prev.livianos += 1
       else prev.pesados += 1
-      if (s.ciudad) prev.ciudades.add(s.ciudad)
+      if (s.ciudad) {
+        prev.ciudades.add(s.ciudad)
+        const canonica = ciudadCanonica(s.ciudad) || s.ciudad
+        prev.conteoCiudades.set(canonica, (prev.conteoCiudades.get(canonica) ?? 0) + 1)
+      }
       acumulado.set(s.tecnico_id, prev)
     }
 
@@ -351,6 +384,7 @@ export function BalanceCuadrillas({
         pesados: r.pesados,
         carga: clasificarCarga(r.total),
         ciudadesTexto: formatearCiudades(r.ciudades, ciudadesActivas[r.tecnico.id]),
+        ciudadPrincipal: ciudadPrincipalDe(r.conteoCiudades),
       }))
       .sort((a, b) => (a.total - b.total) * factor)
 
@@ -392,10 +426,8 @@ export function BalanceCuadrillas({
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {tecnicosSeleccionadosIds.length > 0 && (
             <span className="inline-flex items-center gap-2 rounded-lg bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 ring-1 ring-cyan-500/30">
-              {tecnicosSeleccionadosIds.length}{' '}
-              {tecnicosSeleccionadosIds.length === 1
-                ? 'técnico seleccionado'
-                : 'técnicos seleccionados'}
+              {ciudadSeleccionada ?? SIN_CIUDAD}: {tecnicosSeleccionadosIds.length}{' '}
+              {tecnicosSeleccionadosIds.length === 1 ? 'técnico' : 'técnicos'}
               <button
                 type="button"
                 onClick={onLimpiarSeleccion}
@@ -566,7 +598,7 @@ export function BalanceCuadrillas({
                                           <div className="flex items-center gap-2">
                                             <button
                                               type="button"
-                                              onClick={() => onTogglePatrulla(p.patrulla.id)}
+                                              onClick={() => onTogglePatrulla(p.patrulla.id, c.ciudad)}
                                               aria-pressed={seleccionada}
                                               aria-label={`Seleccionar patrulla ${p.patrulla.nombre}`}
                                               className="shrink-0 cursor-pointer rounded p-0.5 transition hover:bg-white/10"
@@ -650,7 +682,9 @@ export function BalanceCuadrillas({
                                                       seleccionado={tecnicosSeleccionadosIds.includes(
                                                         t.tecnicoId,
                                                       )}
-                                                      onToggle={() => onToggleTecnico(t.tecnicoId)}
+                                                      onToggle={() =>
+                                                        onToggleTecnico(t.tecnicoId, c.ciudad)
+                                                      }
                                                     />
                                                   </li>
                                                 ))
@@ -679,7 +713,7 @@ export function BalanceCuadrillas({
                                         seleccionado={tecnicosSeleccionadosIds.includes(
                                           t.tecnicoId,
                                         )}
-                                        onToggle={() => onToggleTecnico(t.tecnicoId)}
+                                        onToggle={() => onToggleTecnico(t.tecnicoId, c.ciudad)}
                                       />
                                     </li>
                                   ))}
@@ -713,7 +747,7 @@ export function BalanceCuadrillas({
                 <li>
                   <button
                     type="button"
-                    onClick={() => onToggleTecnico('sin_asignar')}
+                    onClick={() => onToggleTecnico('sin_asignar', SIN_CIUDAD)}
                     aria-pressed={
                       tecnicosSeleccionadosIds.includes('sin_asignar') &&
                       sinAsignarCiudadSeleccionada === null
@@ -748,7 +782,7 @@ export function BalanceCuadrillas({
                   <li key={r.tecnico.id}>
                     <button
                       type="button"
-                      onClick={() => onToggleTecnico(r.tecnico.id)}
+                      onClick={() => onToggleTecnico(r.tecnico.id, r.ciudadPrincipal)}
                       aria-pressed={seleccionado}
                       className={cn(
                         'w-full rounded-xl px-3 py-2 text-left transition-all',

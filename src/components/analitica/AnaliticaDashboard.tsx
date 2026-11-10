@@ -44,6 +44,10 @@ export function AnaliticaDashboard({
   const [tecnicosSeleccionadosIds, setTecnicosSeleccionadosIds] = useState<string[]>([])
   // Ciudad de las órdenes sin asignar (solo aplica cuando 'sin_asignar' está seleccionado).
   const [sinAsignarCiudad, setSinAsignarCiudad] = useState<string | null>(null)
+  // Ciudad dueña de la selección actual: confina qué checkboxes pueden marcarse.
+  // OJO: NO filtra los servicios de la radiografía; un técnico multiciudad conserva
+  // todas sus órdenes en todas sus ciudades.
+  const [ciudadSeleccionada, setCiudadSeleccionada] = useState<string | null>(null)
   const [barrioExpandido, setBarrioExpandido] = useState<string | null>(null)
   const [modalCargaAbierto, setModalCargaAbierto] = useState(false)
 
@@ -102,27 +106,39 @@ export function AnaliticaDashboard({
   }, [serviciosFiltrados, tecnicosSeleccionadosIds, sinAsignarCiudad])
 
   // Añade o remueve un técnico de la selección múltiple.
-  const toggleTecnico = (id: string) => {
+  // El confinamiento por ciudad SOLO altera qué checkboxes quedan marcados:
+  // los servicios del técnico seleccionado no se filtran por ciudad.
+  const toggleTecnico = (id: string, ciudad: string) => {
     setBarrioExpandido(null)
     if (id === SIN_ASIGNAR_ID) setSinAsignarCiudad(null)
-    setTecnicosSeleccionadosIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    )
+    setTecnicosSeleccionadosIds((prev) => {
+      const cambiaCiudad = ciudadSeleccionada !== null && ciudadSeleccionada !== ciudad
+      const base = cambiaCiudad ? [] : prev
+      const next = base.includes(id) ? base.filter((x) => x !== id) : [...base, id]
+      setCiudadSeleccionada(next.length === 0 ? null : ciudad)
+      return next
+    })
   }
 
   // Selecciona/deselecciona una patrulla junto con todos sus operadores.
-  const togglePatrulla = (patrullaId: string) => {
+  const togglePatrulla = (patrullaId: string, ciudad: string) => {
     setBarrioExpandido(null)
     const operadoresIds = tecnicos
       .filter((t) => t.patrulla_id === patrullaId)
       .map((t) => t.id)
     setTecnicosSeleccionadosIds((prev) => {
-      const algunoSeleccionado = operadoresIds.some((id) => prev.includes(id))
+      const cambiaCiudad = ciudadSeleccionada !== null && ciudadSeleccionada !== ciudad
+      const base = cambiaCiudad ? [] : prev
+      const algunoSeleccionado = operadoresIds.some((id) => base.includes(id))
+      let next: string[]
       if (algunoSeleccionado) {
         const aExcluir = new Set([patrullaId, ...operadoresIds])
-        return prev.filter((id) => !aExcluir.has(id))
+        next = base.filter((id) => !aExcluir.has(id))
+      } else {
+        next = [...new Set([...base, patrullaId, ...operadoresIds])]
       }
-      return [...new Set([...prev, patrullaId, ...operadoresIds])]
+      setCiudadSeleccionada(next.length === 0 ? null : ciudad)
+      return next
     })
   }
 
@@ -131,9 +147,10 @@ export function AnaliticaDashboard({
     setBarrioExpandido(null)
     setTecnicosSeleccionadosIds([SIN_ASIGNAR_ID])
     setSinAsignarCiudad(ciudad)
+    setCiudadSeleccionada(ciudad)
   }
 
-  // Selecciona todos los técnicos con órdenes en una ciudad.
+  // Selecciona todos los técnicos con órdenes en una ciudad (sustituye la selección).
   const seleccionarTodosDeCiudad = (ciudad: string) => {
     setBarrioExpandido(null)
     const ids = new Set(
@@ -141,7 +158,8 @@ export function AnaliticaDashboard({
         .filter((s) => s.tecnico_id && ciudadCanonica(s.ciudad) === ciudad)
         .map((s) => s.tecnico_id as string),
     )
-    setTecnicosSeleccionadosIds((prev) => [...new Set([...prev, ...ids])])
+    setTecnicosSeleccionadosIds([...ids])
+    setCiudadSeleccionada(ids.size === 0 ? null : ciudad)
   }
 
   // Quita los técnicos con órdenes en una ciudad.
@@ -151,13 +169,18 @@ export function AnaliticaDashboard({
         .filter((s) => s.tecnico_id && ciudadCanonica(s.ciudad) === ciudad)
         .map((s) => s.tecnico_id as string),
     )
-    setTecnicosSeleccionadosIds((prev) => prev.filter((id) => !ids.has(id)))
+    setTecnicosSeleccionadosIds((prev) => {
+      const next = prev.filter((id) => !ids.has(id))
+      if (next.length === 0) setCiudadSeleccionada(null)
+      return next
+    })
   }
 
   // Resetea la selección (vuelve a la vista global).
   const limpiarSeleccionTecnicos = () => {
     setBarrioExpandido(null)
     setSinAsignarCiudad(null)
+    setCiudadSeleccionada(null)
     setTecnicosSeleccionadosIds([])
   }
 
@@ -218,6 +241,7 @@ export function AnaliticaDashboard({
             tecnicos={tecnicos}
             ciudadesActivas={ciudadesActivas}
             tecnicosSeleccionadosIds={tecnicosSeleccionadosIds}
+            ciudadSeleccionada={ciudadSeleccionada}
             sinAsignarCiudadSeleccionada={sinAsignarCiudad}
             onToggleTecnico={toggleTecnico}
             onTogglePatrulla={togglePatrulla}
