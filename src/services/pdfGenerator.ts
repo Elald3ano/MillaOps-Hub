@@ -215,10 +215,10 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   const FACTOR_LINEA = 1.15 // coincide con jspdf-autotable (PHYSICAL_LINE_HEIGHT)
   const aMm = (pt: number) => (pt * 25.4) / 72
 
-  const nombreOriginal = lineas[0] ?? ''
-  // L2 del payload: "Tel: … · Ref: …". L3: "CC: …" (ausente si no hay CC).
-  const detalle = lineas[1] ?? ''
-  const identificacion = lineas[2] ?? ''
+  // El payload llega como "Nombre|Tel: X|Ref: Y|CC: Z". Se parsea por etiqueta
+  // (no por posición) para que un dato ausente no desplace ni oculte los demás.
+  const datos = parsearClienteCelda(lineas)
+  const nombreOriginal = datos.nombre
 
   const padTop = cell.padding('top')
   const x = cell.x + cell.padding('left')
@@ -244,28 +244,34 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
     nombreLinea2 = partes[1]
   }
 
-  // ---- 2. Componer las líneas finales (máximo 3) ----
+  // ---- 2. Componer las líneas finales (máximo 3, sin perder ningún dato) ----
+  // Invariante: Tel, Ref y CC se dibujan SIEMPRE que existan, ocupen la línea
+  // que ocupen. La CC vive en la última línea, junto a la Ref.
   const lineasFinales: Array<{ texto: string; tamano: number; esNombre: boolean }> = [
     { texto: nombreLinea1, tamano: tamanoNombre, esNombre: true },
   ]
 
   if (nombreLinea2) {
-    // El nombre partió: el teléfono se empaqueta tras el apellido sobrante.
-    const { telefono, resto } = separarTelefono(detalle)
+    // Nombre partido: el resto del nombre comparte L2 con el teléfono (deja
+    // mucho aire horizontal libre) y L3 agrupa Ref + CC.
     lineasFinales.push({
-      texto: telefono ? `${nombreLinea2} · ${telefono}` : nombreLinea2,
+      texto: datos.telefono ? `${nombreLinea2} · ${datos.telefono}` : nombreLinea2,
       tamano: F_DETALLE,
       esNombre: false,
     })
     lineasFinales.push({
-      texto: [resto, identificacion].filter(Boolean).join(' · '),
+      texto: [datos.ref, datos.cc].filter(Boolean).join(' · '),
       tamano: F_DETALLE,
       esNombre: false,
     })
   } else {
-    lineasFinales.push({ texto: detalle, tamano: F_DETALLE, esNombre: false })
-    if (identificacion) {
-      lineasFinales.push({ texto: identificacion, tamano: F_DETALLE, esNombre: false })
+    lineasFinales.push({
+      texto: [datos.telefono, datos.ref].filter(Boolean).join(' · '),
+      tamano: F_DETALLE,
+      esNombre: false,
+    })
+    if (datos.cc) {
+      lineasFinales.push({ texto: datos.cc, tamano: F_DETALLE, esNombre: false })
     }
   }
 
@@ -299,15 +305,45 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente celda
 }
 
-/** Separa `"Tel: X · Ref: Y"` en el teléfono y el resto (`"Ref: Y"`). */
-function separarTelefono(detalle: string): { telefono: string; resto: string } {
-  const partes = detalle.split(' · ')
-  const telefono = partes.find((p) => p.startsWith('Tel:')) ?? ''
-  const resto = partes.filter((p) => p !== telefono).join(' · ')
-  return {
-    telefono: telefono.replace(/^Tel:\s*/, ''),
-    resto,
+/**
+ * Descompone la celda de Cliente en sus campos, tolerando los dos formatos:
+ *
+ * - Nuevo: `Nombre|Tel: X|Ref: Y|CC: Z` (separador explícito `|`).
+ * - Antiguo/autoTable: líneas ya partidas por `\n`, donde un dato puede faltar.
+ *
+ * Se busca por etiqueta (`Tel:`, `Ref:`, `CC:`) en lugar de por posición: así
+ * una CC ausente no se confunde con la línea de referencia y nunca se pierde.
+ */
+function parsearClienteCelda(lineas: string[]): {
+  nombre: string
+  telefono: string
+  ref: string
+  cc: string
+} {
+  const campos = lineas
+    .flatMap((l) => l.split('|'))
+    .flatMap((l) => l.split('\n'))
+    .map((l) => l.trim())
+    .filter(Boolean)
+
+  let nombre = ''
+  let ref = ''
+  let cc = ''
+  let telefono = ''
+
+  for (const campo of campos) {
+    if (campo.startsWith('Tel:')) {
+      telefono = campo
+    } else if (campo.startsWith('Ref:')) {
+      ref = campo
+    } else if (campo.startsWith('CC:')) {
+      cc = campo
+    } else if (!nombre) {
+      nombre = campo
+    }
   }
+
+  return { nombre, telefono, ref, cc }
 }
 
 /**
@@ -378,16 +414,7 @@ function ajustarTextoDetalle(
     // se dibujará, así que garantiza que quepa.
     doc.setFontSize(F_DETALLE_MIN)
     tamano = F_DETALLE_MIN
-    const ELLIPSIS = '…'
-    while (texto.length > 0 && doc.getTextWidth(texto + ELLIPSIS) > anchoUtil) {
-      texto = texto.slice(0, -1)
-    }
-    texto =
-      texto.length > 0
-        ? `${texto}${ELLIPSIS}`
-        : doc.getTextWidth(ELLIPSIS) <= anchoUtil
-          ? ELLIPSIS
-          : ''
+    texto = truncarAlAncho(doc, texto, anchoUtil)
   }
 
   return { texto, tamano }
@@ -456,17 +483,15 @@ function dibujarTabla(
       // Barrio y dirección en líneas distintas: la dirección fluye sola en las
       // líneas 2-3 sin que un número suelto (p. ej. "65") quede huérfano.
       [s.barrio || '—', s.direccion || ''].filter(Boolean).join('\n'),
-      // Jerarquía semántica: nombre / (Tel · Ref) / CC. El nombre se parte con
-      // `\n` solo cuando excede el ancho; la celda recompone las líneas.
+      // Jerarquía semántica: nombre / Tel / Ref / CC, con separador explícito
+      // (`|`) para que la celda no dependa del conteo de líneas creadas por
+      // autoTable: con `\n` los datos se reordenaban y la CC se perdía.
       [
         s.nombre_cliente || 'SIN NOMBRE',
-        [s.telefono_cliente ? `Tel: ${s.telefono_cliente}` : '', `Ref: ${s.referencia_pago || 'S/R'}`]
-          .filter(Boolean)
-          .join(' · '),
+        s.telefono_cliente ? `Tel: ${s.telefono_cliente}` : '',
+        `Ref: ${s.referencia_pago || 'S/R'}`,
         s.identificacion ? `CC: ${s.identificacion}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n'),
+      ].join('|'),
       s.tipo_servicio,
     ]),
     margin: { left: MARGEN_TABLA, right: MARGEN_TABLA, bottom: 26 },
