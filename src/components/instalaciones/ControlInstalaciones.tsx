@@ -1,8 +1,15 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Building2,
+  Check,
+  ChevronDown,
   ClipboardList,
   Copy,
+  FileDown,
+  Loader2,
   MessageCircle,
   PackageSearch,
   PencilLine,
@@ -31,9 +38,38 @@ import {
   TIPOS_NOVEDAD_UI,
   textoBadgeNovedad,
 } from './catalogoNovedades'
+import type { FilaInstalacionPdf } from './pdfInstalaciones'
 
 /** Filtro táctico del panel de balance. */
 type FiltroNovedad = 'todas' | 'con_novedad' | 'en_gestion' | 'listas'
+
+/** Columnas ordenables de la tabla (clic en el encabezado alterna dirección). */
+type ColumnaOrden = 'dias' | 'orden' | 'servicio' | 'barrio' | 'operador' | 'novedad'
+
+/** Dirección de ordenamiento activa; `null` = orden natural del reporte. */
+interface Ordenamiento {
+  columna: ColumnaOrden
+  direccion: 'asc' | 'desc'
+}
+
+/** Rangos operativos de antigüedad del filtro de días. */
+type RangoDias = 'todas' | 'recientes' | 'medio' | 'demoradas' | 'criticas'
+
+const RANGOS_DIAS: readonly { id: RangoDias; etiqueta: string; min: number; max: number }[] = [
+  { id: 'todas', etiqueta: 'Todas las edades', min: 0, max: Number.POSITIVE_INFINITY },
+  { id: 'recientes', etiqueta: '0 a 7 días (Recientes)', min: 0, max: 7 },
+  { id: 'medio', etiqueta: '8 a 15 días', min: 8, max: 15 },
+  { id: 'demoradas', etiqueta: '16 a 30 días (Demoradas)', min: 16, max: 30 },
+  { id: 'criticas', etiqueta: '> 30 días (Críticas)', min: 31, max: Number.POSITIVE_INFINITY },
+]
+
+/** Peso del estado de bloqueo para ordenar la columna "Novedad" (rojo primero). */
+function pesoEstadoNovedad(novedad: NovedadInstalacion | undefined): number {
+  if (!novedad) return 3 // sin novedad va al final del asc
+  if (novedad.estado_gestion === 'pendiente') return 0
+  if (novedad.estado_gestion === 'en_gestion') return 1
+  return 2 // resuelto
+}
 
 interface ControlInstalacionesProps {
   /** Órdenes de instalación del último reporte Sigma (solo memoria). */
@@ -103,6 +139,16 @@ export function ControlInstalaciones({
   const [ciudadFiltro, setCiudadFiltro] = useState<string | null>(null)
   const [busqueda, setBusqueda] = useState('')
   const [ordenEnEdicion, setOrdenEnEdicion] = useState<string | null>(null)
+
+  // Filtros tácticos de la cabecera 8/12. Son mutuamente excluyentes con el
+  // filtro de novedades: activar uno limpia el otro (decisión del Arquitecto).
+  const [barriosSeleccionados, setBarriosSeleccionados] = useState<Set<string>>(new Set())
+  const [rangoDias, setRangoDias] = useState<RangoDias>('todas')
+  const [barriosAbierto, setBarriosAbierto] = useState(false)
+  const [busquedaBarrio, setBusquedaBarrio] = useState('')
+  const [orden, setOrden] = useState<Ordenamiento | null>(null)
+  const [generandoPdf, setGenerandoPdf] = useState(false)
+  const panelBarriosRef = useRef<HTMLDivElement>(null)
 
   const tecnicoPorId = useMemo(() => new Map(tecnicos.map((t) => [t.id, t])), [tecnicos])
 
@@ -200,30 +246,115 @@ export function ControlInstalaciones({
     }
   }, [filas])
 
+  /** Barrios disponibles de la ciudad activa (universo, no el ya filtrado). */
+  const barriosDisponibles = useMemo(() => {
+    const porClave = new Map<string, string>()
+    for (const fila of filas) {
+      if (ciudadFiltro && fila.servicio.ciudad !== ciudadFiltro) continue
+      const clave = limpiarBarrio(fila.servicio.barrio)
+      if (!clave) continue
+      if (!porClave.has(clave)) porClave.set(clave, fila.servicio.barrio || 'Sin barrio')
+    }
+    return [...porClave.entries()]
+      .map(([clave, etiqueta]) => ({ clave, etiqueta }))
+      .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta))
+  }, [filas, ciudadFiltro])
+
+  /** Lista del desplegable ya acotada por el buscador interno. */
+  const barriosVisibles = useMemo(() => {
+    const q = limpiarTexto(busquedaBarrio)
+    if (!q) return barriosDisponibles
+    return barriosDisponibles.filter((b) => limpiarTexto(b.etiqueta).includes(q))
+  }, [barriosDisponibles, busquedaBarrio])
+
+  const hayFiltroBarrioODias = barriosSeleccionados.size > 0 || rangoDias !== 'todas'
+
   const filasFiltradas = useMemo(() => {
     const texto = limpiarTexto(busqueda)
-    return filas.filter((fila) => {
+    const rango = RANGOS_DIAS.find((r) => r.id === rangoDias) ?? RANGOS_DIAS[0]!
+
+    const base = filas.filter((fila) => {
       if (ciudadFiltro && fila.servicio.ciudad !== ciudadFiltro) return false
 
-      switch (filtro) {
-        case 'con_novedad':
-          if (!fila.novedad) return false
-          break
-        case 'en_gestion':
-          if (fila.novedad?.estado_gestion !== 'en_gestion') return false
-          break
-        case 'listas':
-          if (fila.novedad) return false
-          break
-        default:
-          break
+      // Grupo B (barrio + días): si está activo, toma el control y el filtro de
+      // novedades del panel izquierdo queda inerte (grupos excluyentes).
+      if (hayFiltroBarrioODias) {
+        const dias = fila.servicio.dias_antiguedad
+        if (dias < rango.min || dias > rango.max) return false
+        if (
+          barriosSeleccionados.size > 0 &&
+          !barriosSeleccionados.has(limpiarBarrio(fila.servicio.barrio))
+        ) {
+          return false
+        }
+      } else {
+        // Grupo A: filtro de novedades.
+        switch (filtro) {
+          case 'con_novedad':
+            if (!fila.novedad) return false
+            break
+          case 'en_gestion':
+            if (fila.novedad?.estado_gestion !== 'en_gestion') return false
+            break
+          case 'listas':
+            if (fila.novedad) return false
+            break
+          default:
+            break
+        }
+        if (tipoDestacado && fila.novedad?.tipo_novedad !== tipoDestacado) return false
       }
 
-      if (tipoDestacado && fila.novedad?.tipo_novedad !== tipoDestacado) return false
       if (texto && !fila.indiceBusqueda.includes(texto)) return false
       return true
     })
-  }, [filas, ciudadFiltro, filtro, tipoDestacado, busqueda])
+
+    if (!orden) return base
+
+    const signo = orden.direccion === 'asc' ? 1 : -1
+    return [...base].sort((a, b) => {
+      switch (orden.columna) {
+        case 'dias':
+          return (a.servicio.dias_antiguedad - b.servicio.dias_antiguedad) * signo
+        case 'orden': {
+          // Comparación numérica cuando ambas son números; si no, alfabética.
+          const na = Number(a.servicio.numero_orden)
+          const nb = Number(b.servicio.numero_orden)
+          if (Number.isFinite(na) && Number.isFinite(nb)) return (na - nb) * signo
+          return a.servicio.numero_orden.localeCompare(b.servicio.numero_orden) * signo
+        }
+        case 'servicio':
+          return a.servicio.tipo_servicio.localeCompare(b.servicio.tipo_servicio) * signo
+        case 'barrio':
+          return a.servicio.barrio.localeCompare(b.servicio.barrio) * signo
+        case 'operador':
+          // Los barrios sin dueño van siempre al final, en cualquier dirección.
+          if (!a.dueno.operador && !b.dueno.operador) return 0
+          if (!a.dueno.operador) return 1
+          if (!b.dueno.operador) return -1
+          return a.dueno.operador.nombre.localeCompare(b.dueno.operador.nombre) * signo
+        case 'novedad': {
+          const pa = pesoEstadoNovedad(a.novedad)
+          const pb = pesoEstadoNovedad(b.novedad)
+          if (pa !== pb) return (pa - pb) * signo
+          // Empate: la más reciente primero dentro del mismo estado.
+          return (a.novedad?.tipo_novedad ?? '').localeCompare(b.novedad?.tipo_novedad ?? '') * signo
+        }
+        default:
+          return 0
+      }
+    })
+  }, [
+    filas,
+    ciudadFiltro,
+    filtro,
+    tipoDestacado,
+    busqueda,
+    hayFiltroBarrioODias,
+    rangoDias,
+    barriosSeleccionados,
+    orden,
+  ])
 
   const servicioEnEdicion = useMemo(
     () => filas.find((f) => f.servicio.numero_orden === ordenEnEdicion) ?? null,
@@ -303,9 +434,137 @@ export function ControlInstalaciones({
   )
 
   const toggleTipo = (tipo: TipoNovedadInstalacion) => {
+    // Grupo A: al activar un filtro de novedad se limpia el grupo B.
     setFiltro('con_novedad')
     setTipoDestacado((prev) => (prev === tipo ? null : tipo))
+    setBarriosSeleccionados(new Set())
+    setRangoDias('todas')
   }
+
+  /** Clic en encabezado: misma columna alterna dirección; otra columna reinicia asc. */
+  const alternarOrden = (columna: ColumnaOrden) => {
+    setOrden((prev) =>
+      prev?.columna === columna
+        ? { columna, direccion: prev.direccion === 'asc' ? 'desc' : 'asc' }
+        : { columna, direccion: 'asc' },
+    )
+  }
+
+  const toggleBarrio = (clave: string) => {
+    // Grupo B: activar barrios limpia el filtro de novedades.
+    setFiltro('todas')
+    setTipoDestacado(null)
+    setBarriosSeleccionados((prev) => {
+      const siguiente = new Set(prev)
+      if (siguiente.has(clave)) siguiente.delete(clave)
+      else siguiente.add(clave)
+      return siguiente
+    })
+  }
+
+  const cambiarRangoDias = (rango: RangoDias) => {
+    setFiltro('todas')
+    setTipoDestacado(null)
+    setRangoDias(rango)
+  }
+
+  const limpiarFiltrosCabecera = () => {
+    setBarriosSeleccionados(new Set())
+    setRangoDias('todas')
+  }
+
+  // Cierra el desplegable de barrios al hacer clic fuera (o con Escape).
+  useEffect(() => {
+    if (!barriosAbierto) return
+    const alClicFuera = (e: MouseEvent) => {
+      if (panelBarriosRef.current && !panelBarriosRef.current.contains(e.target as Node)) {
+        setBarriosAbierto(false)
+      }
+    }
+    const alEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setBarriosAbierto(false)
+    }
+    document.addEventListener('mousedown', alClicFuera)
+    document.addEventListener('keydown', alEscape)
+    return () => {
+      document.removeEventListener('mousedown', alClicFuera)
+      document.removeEventListener('keydown', alEscape)
+    }
+  }, [barriosAbierto])
+
+  /** Exporta la planilla PDF respetando el orden y los filtros en pantalla. */
+  const descargarPlanilla = useCallback(async () => {
+    if (filasFiltradas.length === 0) {
+      notificar('No hay instalaciones para exportar con los filtros actuales.', 'error')
+      return
+    }
+    setGenerandoPdf(true)
+    try {
+      const { generarPlanillaInstalaciones } = await import('./pdfInstalaciones')
+      const { marcaDeTiempo } = await import('../../services/pdfGenerator')
+
+      // Se pasan las filas YA filtradas y ordenadas: el PDF es espejo exacto
+      // de la tabla que el usuario está viendo.
+      const filasPdf: FilaInstalacionPdf[] = filasFiltradas.map((fila) => ({
+        servicio: fila.servicio,
+        operador: fila.dueno.operador?.nombre,
+        novedad: fila.novedad
+          ? {
+              tipo: fila.novedad.tipo_novedad,
+              cajaNap: fila.novedad.caja_nap,
+              comentario: fila.novedad.comentario,
+            }
+          : undefined,
+      }))
+
+      const partes: string[] = []
+      if (ciudadFiltro) partes.push(`Ciudad: ${ciudadFiltro}`)
+      if (barriosSeleccionados.size > 0) {
+        const nombres = barriosDisponibles
+          .filter((b) => barriosSeleccionados.has(b.clave))
+          .map((b) => b.etiqueta)
+        partes.push(`Barrios: ${nombres.join(', ')}`)
+      }
+      const rango = RANGOS_DIAS.find((r) => r.id === rangoDias)
+      if (rango && rango.id !== 'todas') partes.push(`Días: ${rango.etiqueta}`)
+      if (!hayFiltroBarrioODias) {
+        if (filtro === 'con_novedad') partes.push(tipoDestacado ? `Novedad: ${etiquetaDeTipo(tipoDestacado).etiqueta}` : 'Con novedad')
+        if (filtro === 'en_gestion') partes.push('En gestión')
+        if (filtro === 'listas') partes.push('Sin novedad')
+      }
+      if (busqueda.trim()) partes.push(`Búsqueda: "${busqueda.trim()}"`)
+      if (orden) {
+        partes.push(`Orden: ${orden.columna} (${orden.direccion === 'asc' ? 'asc' : 'desc'})`)
+      }
+
+      const nombreArchivo = `PI-instalaciones-${marcaDeTiempo()}`
+      const doc = await generarPlanillaInstalaciones(filasPdf, {
+        notaFiltros: `Filtros: ${partes.length > 0 ? partes.join(' | ') : 'Todas'}`,
+        nombreArchivo,
+      })
+      doc.save(`${nombreArchivo}.pdf`)
+      notificar(`Planilla de instalaciones descargada (${filasPdf.length} órdenes).`, 'success')
+    } catch (error) {
+      notificar(
+        error instanceof Error ? error.message : 'No se pudo generar el PDF de instalaciones.',
+        'error',
+      )
+    } finally {
+      setGenerandoPdf(false)
+    }
+  }, [
+    filasFiltradas,
+    ciudadFiltro,
+    barriosSeleccionados,
+    barriosDisponibles,
+    rangoDias,
+    hayFiltroBarrioODias,
+    filtro,
+    tipoDestacado,
+    busqueda,
+    orden,
+    notificar,
+  ])
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
@@ -380,12 +639,21 @@ export function ControlInstalaciones({
         </section>
 
         <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-          <p className="mb-2 text-[11px] font-semibold tracking-wide text-slate-500 uppercase">
-            Filtro de novedades
-          </p>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold tracking-wide text-slate-500 uppercase">
+              Filtro de novedades
+            </p>
+            {hayFiltroBarrioODias && (
+              <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                Inactivo: hay filtro de barrio/días
+              </span>
+            )}
+          </div>
           <div className="space-y-1">
             {FILTROS.map((opcion) => {
-              const activo = filtro === opcion.id && tipoDestacado === null
+              // El grupo del panel izquierdo queda inerte mientras el grupo
+              // barrio/días de la cabecera esté activo (son excluyentes).
+              const activo = !hayFiltroBarrioODias && filtro === opcion.id && tipoDestacado === null
               const conteo =
                 opcion.id === 'con_novedad'
                   ? conteoNovedades.conNovedad
@@ -466,8 +734,8 @@ export function ControlInstalaciones({
                 <h2 className="text-sm font-bold text-slate-900">Tablero de seguimiento</h2>
                 <p className="text-[11px] text-slate-500">
                   {filasFiltradas.length} de {filas.length} órdenes
-                  {tipoDestacado ? ` · ${etiquetaDeTipo(tipoDestacado).etiqueta}` : ''}
                   {ciudadFiltro ? ` · ${ciudadFiltro}` : ''}
+                  {orden ? ` · Ordenado por ${orden.columna} ${orden.direccion === 'asc' ? '▲' : '▼'}` : ''}
                 </p>
               </div>
             </div>
@@ -493,6 +761,156 @@ export function ControlInstalaciones({
               )}
             </label>
           </header>
+
+          {/* Filtros tácticos + exportación */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+            {/* Barrios (multi-selección con búsqueda) */}
+            <div className="relative" ref={panelBarriosRef}>
+              <button
+                type="button"
+                onClick={() => setBarriosAbierto((v) => !v)}
+                aria-expanded={barriosAbierto}
+                aria-haspopup="listbox"
+                className={cn(
+                  'inline-flex max-w-[260px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium ring-1 transition',
+                  barriosSeleccionados.size > 0
+                    ? 'bg-slate-900 text-white ring-slate-900'
+                    : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
+                )}
+              >
+                <Building2 className="size-3.5 shrink-0" />
+                <span className="truncate">
+                  {barriosSeleccionados.size === 0
+                    ? 'Todos los barrios'
+                    : barriosSeleccionados.size === 1
+                      ? (barriosDisponibles.find((b) => barriosSeleccionados.has(b.clave))
+                          ?.etiqueta ?? '1 barrio')
+                      : `${barriosSeleccionados.size} barrios`}
+                </span>
+                <ChevronDown
+                  className={cn('size-3.5 shrink-0 transition', barriosAbierto && 'rotate-180')}
+                />
+              </button>
+
+              {barriosAbierto && (
+                <div
+                  role="listbox"
+                  aria-multiselectable="true"
+                  aria-label="Filtrar por barrios"
+                  className="absolute top-full left-0 z-30 mt-1 w-64 overflow-hidden rounded-xl bg-white shadow-xl ring-1 ring-slate-200"
+                >
+                  <div className="border-b border-slate-100 p-2">
+                    <label className="relative block">
+                      <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="search"
+                        autoFocus
+                        value={busquedaBarrio}
+                        onChange={(e) => setBusquedaBarrio(e.target.value)}
+                        placeholder="Buscar barrio…"
+                        className="w-full rounded-lg py-1 pr-2 pl-7 text-xs text-slate-900 ring-1 ring-slate-200 outline-none focus:ring-2 focus:ring-slate-900"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto p-1">
+                    {barriosVisibles.length === 0 ? (
+                      <p className="px-2 py-3 text-center text-[11px] text-slate-400">
+                        Sin barrios que coincidan.
+                      </p>
+                    ) : (
+                      barriosVisibles.map((b) => {
+                        const marcado = barriosSeleccionados.has(b.clave)
+                        return (
+                          <button
+                            key={b.clave}
+                            type="button"
+                            role="option"
+                            aria-selected={marcado}
+                            onClick={() => toggleBarrio(b.clave)}
+                            className={cn(
+                              'flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-xs transition',
+                              marcado ? 'bg-slate-100 font-semibold text-slate-900' : 'text-slate-600 hover:bg-slate-50',
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'flex size-3.5 shrink-0 items-center justify-center rounded ring-1',
+                                marcado
+                                  ? 'bg-slate-900 text-white ring-slate-900'
+                                  : 'bg-white ring-slate-300',
+                              )}
+                            >
+                              {marcado && <Check className="size-2.5" />}
+                            </span>
+                            <span className="truncate">{b.etiqueta}</span>
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+
+                  {barriosSeleccionados.size > 0 && (
+                    <div className="border-t border-slate-100 p-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBarriosSeleccionados(new Set())
+                          setBusquedaBarrio('')
+                        }}
+                        className="w-full rounded-lg px-2 py-1 text-left text-[11px] font-medium text-slate-500 transition hover:bg-slate-50"
+                      >
+                        Limpiar selección
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Días */}
+            <select
+              value={rangoDias}
+              onChange={(e) => cambiarRangoDias(e.target.value as RangoDias)}
+              aria-label="Filtrar por rango de días"
+              className={cn(
+                'cursor-pointer rounded-lg px-2 py-1.5 text-xs font-medium ring-1 transition',
+                rangoDias !== 'todas'
+                  ? 'bg-slate-900 text-white ring-slate-900'
+                  : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
+              )}
+            >
+              {RANGOS_DIAS.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.etiqueta}
+                </option>
+              ))}
+            </select>
+
+            {hayFiltroBarrioODias && (
+              <button
+                type="button"
+                onClick={limpiarFiltrosCabecera}
+                className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-medium text-slate-500 transition hover:bg-slate-100"
+              >
+                <X className="size-3" /> Limpiar
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => void descargarPlanilla()}
+              disabled={generandoPdf || filasFiltradas.length === 0}
+              className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {generandoPdf ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <FileDown className="size-3.5" />
+              )}
+              Descargar Planilla PDF
+            </button>
+          </div>
 
           {filas.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-slate-200 px-4 py-10 text-center">
@@ -538,16 +956,53 @@ export function ControlInstalaciones({
           ) : (
             <div className="overflow-hidden rounded-xl ring-1 ring-slate-200">
               <div className="max-h-[640px] overflow-auto">
-                <table className="w-full min-w-[940px] text-left text-xs">
+                <table className="w-full min-w-[1060px] text-left text-xs">
                   <thead className="sticky top-0 z-10 bg-slate-900 text-[10px] tracking-wide text-slate-400 uppercase">
                     <tr>
-                      <th className="px-3 py-2 font-semibold">Días</th>
-                      <th className="px-3 py-2 font-semibold">Orden #</th>
+                      <EncabezadoOrdenable
+                        columna="dias"
+                        titulo="Días"
+                        onOrdenar={alternarOrden}
+                        icono={<IconoOrden columna="dias" orden={orden} />}
+                        activa={orden?.columna === 'dias'}
+                      />
+                      <EncabezadoOrdenable
+                        columna="orden"
+                        titulo="Orden #"
+                        onOrdenar={alternarOrden}
+                        icono={<IconoOrden columna="orden" orden={orden} />}
+                        activa={orden?.columna === 'orden'}
+                      />
                       <th className="px-3 py-2 font-semibold">Ciudad</th>
-                      <th className="px-3 py-2 font-semibold">Barrio / Dirección</th>
+                      <EncabezadoOrdenable
+                        columna="barrio"
+                        titulo="Barrio / Dirección"
+                        onOrdenar={alternarOrden}
+                        icono={<IconoOrden columna="barrio" orden={orden} />}
+                        activa={orden?.columna === 'barrio'}
+                      />
                       <th className="px-3 py-2 font-semibold">Cliente / Tel.</th>
-                      <th className="px-3 py-2 font-semibold">Operador de Zona</th>
-                      <th className="px-3 py-2 font-semibold">Novedad / Seguimiento</th>
+                      <EncabezadoOrdenable
+                        columna="servicio"
+                        titulo="Servicio"
+                        onOrdenar={alternarOrden}
+                        icono={<IconoOrden columna="servicio" orden={orden} />}
+                        activa={orden?.columna === 'servicio'}
+                      />
+                      <EncabezadoOrdenable
+                        columna="operador"
+                        titulo="Operador de Zona"
+                        onOrdenar={alternarOrden}
+                        icono={<IconoOrden columna="operador" orden={orden} />}
+                        activa={orden?.columna === 'operador'}
+                      />
+                      <EncabezadoOrdenable
+                        columna="novedad"
+                        titulo="Novedad / Seguimiento"
+                        onOrdenar={alternarOrden}
+                        icono={<IconoOrden columna="novedad" orden={orden} />}
+                        activa={orden?.columna === 'novedad'}
+                      />
                       <th className="px-3 py-2 font-semibold">Acciones</th>
                     </tr>
                   </thead>
@@ -586,6 +1041,11 @@ export function ControlInstalaciones({
                                 Tel: {servicio.telefono_cliente}
                               </p>
                             )}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className="inline-flex items-center rounded-md bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-800 ring-1 ring-sky-200">
+                              {servicio.tipo_servicio}
+                            </span>
                           </td>
                           <td className="px-3 py-2">
                             {dueno.operador ? (
@@ -685,6 +1145,54 @@ export function ControlInstalaciones({
         onEliminar={handleEliminar}
       />
     </div>
+  )
+}
+
+/** Indicador de dirección del encabezado: ▲ asc, ▼ desc, ⇅ sin ordenar. */
+function IconoOrden({
+  columna,
+  orden,
+}: {
+  columna: ColumnaOrden
+  orden: Ordenamiento | null
+}) {
+  if (orden?.columna !== columna) return <ArrowUpDown className="size-3 opacity-40" />
+  return orden.direccion === 'asc' ? (
+    <ArrowUp className="size-3" />
+  ) : (
+    <ArrowDown className="size-3" />
+  )
+}
+
+/** Encabezado con indicador ▲ / ▼ / ⇅ (clic para ordenar por esa columna). */
+function EncabezadoOrdenable({
+  columna,
+  titulo,
+  onOrdenar,
+  icono,
+  activa,
+}: {
+  columna: ColumnaOrden
+  titulo: string
+  onOrdenar: (columna: ColumnaOrden) => void
+  icono: React.ReactNode
+  activa: boolean
+}) {
+  return (
+    <th className="px-3 py-2 font-semibold">
+      <button
+        type="button"
+        onClick={() => onOrdenar(columna)}
+        aria-label={`Ordenar por ${titulo}`}
+        className={cn(
+          'inline-flex items-center gap-1 transition hover:text-white',
+          activa && 'text-white',
+        )}
+      >
+        {titulo}
+        {icono}
+      </button>
+    </th>
   )
 }
 
