@@ -215,8 +215,8 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   const FACTOR_LINEA = 1.15 // coincide con jspdf-autotable (PHYSICAL_LINE_HEIGHT)
   const aMm = (pt: number) => (pt * 25.4) / 72
 
-  // El payload llega como "Nombre|Tel: X|Ref: Y|CC: Z". Se parsea por etiqueta
-  // (no por posición) para que un dato ausente no desplace ni oculte los demás.
+  // Se parsea por etiqueta (no por posición) y con valores YA limpios: una CC o
+  // un teléfono ausentes llegan como cadena vacía y NUNCA producen "Tel: · ".
   const datos = parsearClienteCelda(lineas)
   const nombreOriginal = datos.nombre
 
@@ -244,32 +244,29 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
     nombreLinea2 = partes[1]
   }
 
-  // ---- 2. Componer las líneas finales (máximo 3, sin perder ningún dato) ----
-  // Invariante: Tel, Ref y CC se dibujan SIEMPRE que existan, ocupen la línea
-  // que ocupen. La CC vive en la última línea, junto a la Ref.
+  // ---- 2. Componer las líneas finales con condicionales limpios ----
+  // Regla de oro: la REREFERENCIA nunca se corta. Si el contacto completo no
+  // cabe, se omite el teléfono entero antes que truncar la Ref (antes el
+  // truncador se comía el número y dejaba "Ref:" huérfano al final del texto).
   const lineasFinales: Array<{ texto: string; tamano: number; esNombre: boolean }> = [
     { texto: nombreLinea1, tamano: tamanoNombre, esNombre: true },
   ]
 
+  // Contacto de la línea 2: "Tel: X · Ref: Y" recortando por prioridad.
+  const contacto = componerContacto(doc, datos.telefono, datos.ref, anchoUtil)
+
   if (nombreLinea2) {
-    // Nombre partido: el resto del nombre comparte L2 con el teléfono (deja
+    // Nombre partido: el resto del nombre comparte L2 con el contacto (deja
     // mucho aire horizontal libre) y L3 agrupa Ref + CC.
+    const sufijo = [nombreLinea2, contacto].filter(Boolean).join(' · ')
+    lineasFinales.push({ texto: sufijo, tamano: F_DETALLE, esNombre: false })
     lineasFinales.push({
-      texto: datos.telefono ? `${nombreLinea2} · ${datos.telefono}` : nombreLinea2,
-      tamano: F_DETALLE,
-      esNombre: false,
-    })
-    lineasFinales.push({
-      texto: [datos.ref, datos.cc].filter(Boolean).join(' · '),
+      texto: datos.cc,
       tamano: F_DETALLE,
       esNombre: false,
     })
   } else {
-    lineasFinales.push({
-      texto: [datos.telefono, datos.ref].filter(Boolean).join(' · '),
-      tamano: F_DETALLE,
-      esNombre: false,
-    })
+    lineasFinales.push({ texto: contacto, tamano: F_DETALLE, esNombre: false })
     if (datos.cc) {
       lineasFinales.push({ texto: datos.cc, tamano: F_DETALLE, esNombre: false })
     }
@@ -306,6 +303,32 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
 }
 
 /**
+ * Compone la línea de contacto dando prioridad a la referencia.
+ *
+ * - Ambos datos: `Tel: X · Ref: Y`; si no cabe, **se omite el teléfono** y se
+ *   conserva `Ref: Y` completa (la referencia es el dato crítico de cobro).
+ * - Solo uno: se emite únicamente ese, sin etiquetas fantasma.
+ * - Ninguno: cadena vacía (la línea no se dibuja).
+ */
+function componerContacto(
+  doc: jsPDF,
+  telefono: string,
+  ref: string,
+  anchoUtil: number,
+): string {
+  if (!telefono && !ref) return ''
+  if (!telefono) return ref
+  if (!ref) return telefono
+
+  const completo = `${telefono} · ${ref}`
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(7)
+  if (doc.getTextWidth(completo) <= anchoUtil) return completo
+  // No cabe completo: la Ref tiene prioridad absoluta.
+  return ref
+}
+
+/**
  * Descompone la celda de Cliente en sus campos, tolerando los dos formatos:
  *
  * - Nuevo: `Nombre|Tel: X|Ref: Y|CC: Z` (separador explícito `|`).
@@ -313,6 +336,10 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
  *
  * Se busca por etiqueta (`Tel:`, `Ref:`, `CC:`) en lugar de por posición: así
  * una CC ausente no se confunde con la línea de referencia y nunca se pierde.
+ *
+ * Cada campo se devuelve ya formateado y con **valor real**: si la orden no
+ * trae teléfono o cédula, ese campo llega como `''` (nunca "Tel: " vacío), de
+ * modo que el llamador puede omitir la etiqueta por completo.
  */
 function parsearClienteCelda(lineas: string[]): {
   nombre: string
@@ -331,13 +358,19 @@ function parsearClienteCelda(lineas: string[]): {
   let cc = ''
   let telefono = ''
 
+  /** Devuelve "Etiqueta: valor" solo si el valor tiene contenido real. */
+  const conEtiqueta = (etiqueta: string, valor: string): string => {
+    const limpio = valor.trim()
+    return limpio ? `${etiqueta}: ${limpio}` : ''
+  }
+
   for (const campo of campos) {
     if (campo.startsWith('Tel:')) {
-      telefono = campo
+      telefono = conEtiqueta('Tel', campo.slice(4))
     } else if (campo.startsWith('Ref:')) {
-      ref = campo
+      ref = conEtiqueta('Ref', campo.slice(4))
     } else if (campo.startsWith('CC:')) {
-      cc = campo
+      cc = conEtiqueta('CC', campo.slice(3))
     } else if (!nombre) {
       nombre = campo
     }
@@ -486,12 +519,15 @@ function dibujarTabla(
       // Jerarquía semántica: nombre / Tel / Ref / CC, con separador explícito
       // (`|`) para que la celda no dependa del conteo de líneas creadas por
       // autoTable: con `\n` los datos se reordenaban y la CC se perdía.
+      // Cada etiqueta se emite SOLO si el dato existe (nada de "Tel: " vacío).
       [
-        s.nombre_cliente || 'SIN NOMBRE',
-        s.telefono_cliente ? `Tel: ${s.telefono_cliente}` : '',
-        `Ref: ${s.referencia_pago || 'S/R'}`,
-        s.identificacion ? `CC: ${s.identificacion}` : '',
-      ].join('|'),
+        s.nombre_cliente?.trim() || 'SIN NOMBRE',
+        s.telefono_cliente?.trim() ? `Tel: ${s.telefono_cliente.trim()}` : '',
+        s.referencia_pago?.trim() ? `Ref: ${s.referencia_pago.trim()}` : '',
+        s.identificacion?.trim() ? `CC: ${s.identificacion.trim()}` : '',
+      ]
+        .filter(Boolean)
+        .join('|'),
       s.tipo_servicio,
     ]),
     margin: { left: MARGEN_TABLA, right: MARGEN_TABLA, bottom: 26 },
