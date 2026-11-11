@@ -70,7 +70,9 @@ const COLOR_AMARILLO: [number, number, number] = [250, 204, 21] // #facc15 (yell
 // Ancho útil: 210 mm (A4) − 8 mm × 2 = 194 mm; los anchos de columna suman 194 mm.
 const ESTILOS_CUERPO: UserOptions['styles'] = {
   fontSize: 8.5,
-  cellPadding: 2.5,
+  // Padding asimétrico: menos aire vertical contra la línea divisoria de la
+  // fila, manteniendo el margen lateral que evita que el texto roce los bordes.
+  cellPadding: { top: 1.5, bottom: 1.5, left: 2, right: 2 },
   overflow: 'linebreak',
   valign: 'middle',
   lineColor: COLOR_BORDE,
@@ -190,19 +192,27 @@ function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: Opcione
 
 /**
  * Dibuja la celda compuesta de "Cliente" con tipografía mixta: nombre en
- * negrita 8.5 pt y teléfono/referencia en 8 pt (gris con contraste).
+ * negrita 8 pt y teléfono/referencia en 7 pt (gris con contraste).
+ *
+ * El bloque se compone con un paso de línea explícito (`PASO_LINEA`) en lugar
+ * del interlineado natural de la fuente: así el nombre y sus detalles quedan
+ * visualmente cohesionados y la fila no se infla cuando el detalle ocupa más
+ * de una línea.
  */
 function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
-  const F_NOMBRE = 8.5
-  const F_DETALLE = 8
-  const F_DETALLE_MIN = 6.5
-  const PASO_REDUCCION = 0.5
+  const F_NOMBRE = 8
+  const F_DETALLE = 7
+  const F_DETALLE_MIN = 6
+  const PASO_REDUCCION = 0.25
+  // Paso vertical entre líneas del bloque (mm). El interlineado natural de
+  // jspdf-autotable era ~3.25 mm; aquí se fija explícitamente para que sea
+  // constante aunque cambie el tamaño de fuente del detalle (7 pt → 6 pt).
+  const PASO_LINEA = 3.3
   const FACTOR_LINEA = 1.15 // coincide con jspdf-autotable (PHYSICAL_LINE_HEIGHT)
   const aMm = (pt: number) => (pt * 25.4) / 72
 
   const altoNombre = aMm(F_NOMBRE) * FACTOR_LINEA
-  const altoDetalle = aMm(F_DETALLE) * FACTOR_LINEA
-  const altoTotal = altoNombre + altoDetalle * (lineas.length - 1)
+  const altoTotal = altoNombre + PASO_LINEA * (lineas.length - 1)
 
   const padTop = cell.padding('top')
   const disponible = cell.height - padTop - cell.padding('bottom')
@@ -217,7 +227,7 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   doc.setFontSize(F_NOMBRE)
   doc.setTextColor(...COLOR_NAVY)
   let nombre = lineas[0] ?? ''
-  // El nombre también se protege: si no cabe en negrita 8.5, se trunca.
+  // El nombre también se protege: si no cabe en negrita 8 pt, se trunca.
   if (doc.getTextWidth(nombre) > anchoUtil) {
     const ELLIPSIS = '…'
     while (nombre.length > 0 && doc.getTextWidth(nombre + ELLIPSIS) > anchoUtil) {
@@ -226,7 +236,7 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
     nombre = nombre.length > 0 ? `${nombre}${ELLIPSIS}` : ''
   }
   doc.text(nombre, x, base)
-  base += altoNombre
+  base += PASO_LINEA
 
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(...COLOR_DETALLE)
@@ -257,7 +267,7 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
 
     doc.text(texto, x, base)
     doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente línea
-    base += altoDetalle
+    base += PASO_LINEA
   }
 }
 
