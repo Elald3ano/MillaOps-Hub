@@ -187,65 +187,165 @@ function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: Opcione
 }
 
 /**
- * Dibuja la celda compuesta de "Cliente" con jerarquía semántica de 3 líneas:
+ * Dibuja la celda compuesta de "Cliente" con un layout de **3 líneas máximo**:
  *
- *   1. Nombre del cliente (negrita 8 pt)
- *   2. `Tel: … · Ref: …` (7 pt, gris de detalle)
- *   3. `CC: …` (7 pt) — solo si hay identificación
+ *   Caso normal (el nombre cabe en una línea):
+ *     L1  Nombre (bold)
+ *     L2  Tel: … · Ref: …
+ *     L3  CC: …
  *
- * El bloque usa un paso explícito (`PASO_LINEA`) para no depender del
- * interlineado natural: 3 líneas caben con holgura en los ~10 mm que la fila
- * ya reserva por el tipo de servicio, sin desplazar la línea divisoria.
+ *   Caso nombre largo (parte en L1 y L2):
+ *     L1  ESTEFANY LICEL SINISTERRA
+ *     L2  PAREDES · Tel: 3101234567
+ *     L3  Ref: … · CC: …
+ *
+ * El teléfono se "empaqueta" tras el resto del nombre en lugar de abrir una
+ * línea nueva: la parte sobrante del nombre suele dejar mucho aire horizontal
+ * libre en L2, que de otro modo se desperdicia e infla la celda a 4 líneas.
+ *
+ * Primero se intenta el nombre a 8 pt; si excede el ancho útil (~50 mm) se
+ * reduce a 7.5 pt, que resuelve la mayoría de nombres de 3-4 palabras sin
+ * partirlos. Solo si aun así no cabe se parte por palabras.
  */
 function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   const F_NOMBRE = 8
+  const F_NOMBRE_REDUCIDO = 7.5
   const F_DETALLE = 7
   const PASO_LINEA = 3.3
   const FACTOR_LINEA = 1.15 // coincide con jspdf-autotable (PHYSICAL_LINE_HEIGHT)
   const aMm = (pt: number) => (pt * 25.4) / 72
 
-  const altoNombre = aMm(F_NOMBRE) * FACTOR_LINEA
-  const altoTotal = altoNombre + PASO_LINEA * (lineas.length - 1)
+  const nombreOriginal = lineas[0] ?? ''
+  // L2 del payload: "Tel: … · Ref: …". L3: "CC: …" (ausente si no hay CC).
+  const detalle = lineas[1] ?? ''
+  const identificacion = lineas[2] ?? ''
 
   const padTop = cell.padding('top')
-  const disponible = cell.height - padTop - cell.padding('bottom')
-  const tope = cell.y + padTop + Math.max(0, (disponible - altoTotal) / 2)
-
   const x = cell.x + cell.padding('left')
   // Ancho real disponible para el texto dentro de la celda (sin paddings).
   const anchoUtil = cell.width - cell.padding('left') - cell.padding('right')
-  let base = tope + aMm(F_NOMBRE) * (2 - FACTOR_LINEA) // ajuste de línea base de autotable
 
+  // ---- 1. Elegir tamaño del nombre y decidir si parte en dos líneas ----
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(F_NOMBRE)
-  doc.setTextColor(...COLOR_NAVY)
-  let nombre = lineas[0] ?? ''
-  // El nombre también se protege: si no cabe en negrita 8 pt, se trunca.
-  if (doc.getTextWidth(nombre) > anchoUtil) {
-    const ELLIPSIS = '…'
-    while (nombre.length > 0 && doc.getTextWidth(nombre + ELLIPSIS) > anchoUtil) {
-      nombre = nombre.slice(0, -1)
-    }
-    nombre = nombre.length > 0 ? `${nombre}${ELLIPSIS}` : ''
+  let tamanoNombre = F_NOMBRE
+  if (doc.getTextWidth(nombreOriginal) > anchoUtil) {
+    // Auto-ajuste: 7.5 pt resuelve la mayoría de nombres largos.
+    tamanoNombre = F_NOMBRE_REDUCIDO
+    doc.setFontSize(tamanoNombre)
   }
-  doc.text(nombre, x, base)
-  base += PASO_LINEA
 
-  doc.setFont('helvetica', 'normal')
-  doc.setTextColor(...COLOR_DETALLE)
-  for (let i = 1; i < lineas.length; i++) {
-    const ajustada = ajustarTextoDetalle(doc, lineas[i] ?? '', anchoUtil)
-    if (!ajustada.texto) {
-      base += PASO_LINEA
-      continue
+  const cabeEntero = doc.getTextWidth(nombreOriginal) <= anchoUtil
+  let nombreLinea1 = nombreOriginal
+  let nombreLinea2 = ''
+  if (!cabeEntero) {
+    const partes = partirNombre(doc, nombreOriginal, anchoUtil, tamanoNombre)
+    nombreLinea1 = partes[0]
+    nombreLinea2 = partes[1]
+  }
+
+  // ---- 2. Componer las líneas finales (máximo 3) ----
+  const lineasFinales: Array<{ texto: string; tamano: number; esNombre: boolean }> = [
+    { texto: nombreLinea1, tamano: tamanoNombre, esNombre: true },
+  ]
+
+  if (nombreLinea2) {
+    // El nombre partió: el teléfono se empaqueta tras el apellido sobrante.
+    const { telefono, resto } = separarTelefono(detalle)
+    lineasFinales.push({
+      texto: telefono ? `${nombreLinea2} · ${telefono}` : nombreLinea2,
+      tamano: F_DETALLE,
+      esNombre: false,
+    })
+    lineasFinales.push({
+      texto: [resto, identificacion].filter(Boolean).join(' · '),
+      tamano: F_DETALLE,
+      esNombre: false,
+    })
+  } else {
+    lineasFinales.push({ texto: detalle, tamano: F_DETALLE, esNombre: false })
+    if (identificacion) {
+      lineasFinales.push({ texto: identificacion, tamano: F_DETALLE, esNombre: false })
     }
-    // Se dibuja con el tamaño con el que se midió: si la reducción a 6-7 pt
-    // se descartara aquí, el texto que "cabía" desbordaría la columna.
-    doc.setFontSize(ajustada.tamano)
-    doc.text(ajustada.texto, x, base)
+  }
+
+  const visibles = lineasFinales.filter((l) => l.texto)
+  const altoTotal = aMm(F_NOMBRE) * FACTOR_LINEA + PASO_LINEA * Math.max(0, visibles.length - 1)
+
+  // ---- 3. Centrado vertical y dibujo ----
+  const disponible = cell.height - padTop - cell.padding('bottom')
+  const tope = cell.y + padTop + Math.max(0, (disponible - altoTotal) / 2)
+  let base = tope + aMm(F_NOMBRE) * (2 - FACTOR_LINEA) // ajuste de línea base de autotable
+
+  for (const linea of visibles) {
+    if (linea.esNombre) {
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(linea.tamano)
+      doc.setTextColor(...COLOR_NAVY)
+      doc.text(truncarAlAncho(doc, linea.texto, anchoUtil), x, base)
+    } else {
+      doc.setFont('helvetica', 'normal')
+      doc.setTextColor(...COLOR_DETALLE)
+      const ajustada = ajustarTextoDetalle(doc, linea.texto, anchoUtil)
+      if (ajustada.texto) {
+        // Se dibuja con el tamaño con el que se midió: si la reducción a 6-7 pt
+        // se descartara aquí, el texto que "cabía" desbordaría la columna.
+        doc.setFontSize(ajustada.tamano)
+        doc.text(ajustada.texto, x, base)
+      }
+    }
     base += PASO_LINEA
   }
   doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente celda
+}
+
+/** Separa `"Tel: X · Ref: Y"` en el teléfono y el resto (`"Ref: Y"`). */
+function separarTelefono(detalle: string): { telefono: string; resto: string } {
+  const partes = detalle.split(' · ')
+  const telefono = partes.find((p) => p.startsWith('Tel:')) ?? ''
+  const resto = partes.filter((p) => p !== telefono).join(' · ')
+  return {
+    telefono: telefono.replace(/^Tel:\s*/, ''),
+    resto,
+  }
+}
+
+/**
+ * Parte un nombre en dos tramos a la altura del último espacio posible:
+ * L1 con las palabras que caben, L2 con el resto. El tramo de L2 puede quedar
+ * muy corto (p. ej. "PAREDES"), que es justo el espacio que se reutiliza.
+ */
+function partirNombre(
+  doc: jsPDF,
+  nombre: string,
+  anchoUtil: number,
+  tamano: number,
+): [string, string] {
+  doc.setFont('helvetica', 'bold')
+  doc.setFontSize(tamano)
+  const palabras = nombre.split(/\s+/).filter(Boolean)
+  if (palabras.length <= 1) return [nombre, '']
+
+  let linea1 = ''
+  for (let i = 0; i < palabras.length; i++) {
+    const candidata = linea1 ? `${linea1} ${palabras[i]}` : palabras[i]
+    if (doc.getTextWidth(candidata) > anchoUtil && linea1) {
+      return [linea1, palabras.slice(i).join(' ')]
+    }
+    linea1 = candidata
+  }
+  return [linea1, '']
+}
+
+/** Trunca con puntos suspensivos si el texto excede el ancho disponible. */
+function truncarAlAncho(doc: jsPDF, texto: string, anchoUtil: number): string {
+  if (doc.getTextWidth(texto) <= anchoUtil) return texto
+  let recortado = texto
+  const ELLIPSIS = '…'
+  while (recortado.length > 0 && doc.getTextWidth(recortado + ELLIPSIS) > anchoUtil) {
+    recortado = recortado.slice(0, -1)
+  }
+  return recortado.length > 0 ? `${recortado}${ELLIPSIS}` : ''
 }
 
 /**
@@ -356,7 +456,8 @@ function dibujarTabla(
       // Barrio y dirección en líneas distintas: la dirección fluye sola en las
       // líneas 2-3 sin que un número suelto (p. ej. "65") quede huérfano.
       [s.barrio || '—', s.direccion || ''].filter(Boolean).join('\n'),
-      // Jerarquía semántica: nombre / (Tel · Ref) / CC.
+      // Jerarquía semántica: nombre / (Tel · Ref) / CC. El nombre se parte con
+      // `\n` solo cuando excede el ancho; la celda recompone las líneas.
       [
         s.nombre_cliente || 'SIN NOMBRE',
         [s.telefono_cliente ? `Tel: ${s.telefono_cliente}` : '', `Ref: ${s.referencia_pago || 'S/R'}`]
