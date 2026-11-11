@@ -321,6 +321,45 @@ export type Database = {
         }
         Relationships: []
       }
+      servicios_instalaciones: {
+        Row: {
+          id: string
+          orden_id: string
+          ciudad: string
+          barrio: string | null
+          direccion: string | null
+          cliente_nombre: string | null
+          telefono: string | null
+          tipo_servicio: string | null
+          dias_abierta: number | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          orden_id: string
+          ciudad: string
+          barrio?: string | null
+          direccion?: string | null
+          cliente_nombre?: string | null
+          telefono?: string | null
+          tipo_servicio?: string | null
+          dias_abierta?: number | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          orden_id?: string
+          ciudad?: string
+          barrio?: string | null
+          direccion?: string | null
+          cliente_nombre?: string | null
+          telefono?: string | null
+          tipo_servicio?: string | null
+          dias_abierta?: number | null
+          created_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: Record<string, never>
     Functions: Record<string, never>

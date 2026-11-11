@@ -33,6 +33,8 @@ type MapeoServicioRow = Database['public']['Tables']['mapeo_servicios']['Row']
 type NovedadInstalacionRow = Database['public']['Tables']['novedades_instalaciones']['Row']
 type NovedadInstalacionInsert =
   Database['public']['Tables']['novedades_instalaciones']['Insert']
+type InstalacionRow = Database['public']['Tables']['servicios_instalaciones']['Row']
+type InstalacionInsert = Database['public']['Tables']['servicios_instalaciones']['Insert']
 
 // Supabase limita el payload de una inserción; se particiona en lotes de 500.
 const TAMANO_LOTE_INSERCION = 500
@@ -1196,4 +1198,97 @@ export async function obtenerTiposInstalaciones(): Promise<Set<string>> {
     if (clave) claves.add(clave)
   }
   return claves
+}
+
+// ---- Persistencia cíclica de instalaciones ----
+
+// Las instalaciones rondan las ~355 filas: lotes más pequeños que el despacho
+// mantienen el payload de cada inserción bien por debajo del límite de Supabase.
+const TAMANO_LOTE_INSTALACIONES = 100
+
+function mapInstalacion(row: InstalacionRow): ServicioNuevo {
+  return {
+    numero_orden: row.orden_id,
+    ciudad: row.ciudad,
+    barrio: row.barrio ?? '',
+    direccion: row.direccion ?? undefined,
+    tipo_servicio: row.tipo_servicio ?? '',
+    nombre_cliente: row.cliente_nombre ?? undefined,
+    telefono_cliente: row.telefono ?? undefined,
+    dias_antiguedad: row.dias_abierta ?? 0,
+    // La tabla no guarda fecha de creación ni estado Sigma: el tablero de
+    // instalaciones solo usa estos campos, y ninguno afecta a la asignación.
+    fecha_creacion: row.created_at,
+    tecnico_id: null,
+    estado: 'ABIERTO',
+  }
+}
+
+/**
+ * Carga las órdenes de instalación persistidas (para sobrevivir un F5).
+ *
+ * Tolerante a fallos: si la migración aún no se ejecutó devuelve `[]` y avisa
+ * por consola, igual que el resto de tablas opcionales del Hub.
+ */
+export async function obtenerInstalacionesActivas(): Promise<ServicioNuevo[]> {
+  const resultado = await leerTodasLasFilas<InstalacionRow>((desde, hasta) =>
+    supabase.from('servicios_instalaciones').select('*').order('orden_id').range(desde, hasta),
+  )
+
+  if (resultado.error) {
+    console.warn(
+      '[obtenerInstalacionesActivas] Instalaciones no disponibles:',
+      resultado.error.message,
+    )
+    return []
+  }
+
+  return resultado.data.map(mapInstalacion)
+}
+
+/**
+ * Reemplazo cíclico del conjunto de instalaciones (mismo patrón que
+ * `reemplazarServiciosActivos`): borra todo lo anterior e inserta el reporte
+ * nuevo en lotes.
+ *
+ * Es destructivo por diseño: el tablero siempre refleja el ÚLTIMO reporte
+ * cargado, sin historial.
+ */
+export async function reemplazarInstalacionesActivas(
+  instalaciones: ServicioNuevo[],
+): Promise<number> {
+  // 1. Borrar el conjunto anterior. `.neq` sobre la PK cubre "todas las filas"
+  //    porque PostgREST rechaza un DELETE sin filtro.
+  const { error: delError } = await supabase
+    .from('servicios_instalaciones')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (delError) {
+    throw new Error(`Error al limpiar las instalaciones anteriores: ${delError.message}`)
+  }
+
+  if (instalaciones.length === 0) return 0
+
+  // Se construyen explícitamente solo las columnas de la tabla: `fecha_cierre`
+  // y `tecnico_sigma` son informativos del reporte y no se persisten aquí.
+  const filas: InstalacionInsert[] = instalaciones.map((servicio) => ({
+    orden_id: servicio.numero_orden,
+    ciudad: servicio.ciudad,
+    barrio: servicio.barrio || null,
+    direccion: servicio.direccion ?? null,
+    cliente_nombre: servicio.nombre_cliente ?? null,
+    telefono: servicio.telefono_cliente ?? null,
+    tipo_servicio: servicio.tipo_servicio || null,
+    dias_abierta: servicio.dias_antiguedad,
+  }))
+
+  let insertadas = 0
+  for (const chunk of chunkArray(filas, TAMANO_LOTE_INSTALACIONES)) {
+    const { error } = await supabase.from('servicios_instalaciones').insert(chunk)
+    if (error) throw new Error(`Error al insertar instalaciones: ${error.message}`)
+    insertadas += chunk.length
+  }
+
+  return insertadas
 }

@@ -20,10 +20,12 @@ import {
   getUltimaAuditoriaCierres,
   guardarNovedadInstalacion,
   obtenerCategoriasServicios,
+  obtenerInstalacionesActivas,
   obtenerNovedadesInstalaciones,
   obtenerTiposInstalaciones,
   obtenerTiposNoDespachables,
   reasignarServiciosActivos,
+  reemplazarInstalacionesActivas,
   reemplazarServiciosActivos,
 } from './services/supabaseService'
 import type { CategoriaConServicios, EntradaNovedadInstalacion, NovedadInstalacion, ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
@@ -55,7 +57,8 @@ function App() {
   const [categorias, setCategorias] = useState<CategoriaConServicios[]>([])
   const [tiposNoDespachables, setTiposNoDespachables] = useState<Set<string>>(new Set())
   // Control de Instalaciones: claves de tipos de la categoría "Instalaciones y
-  // Traslados" (para desviar el intake) + órdenes en memoria (nunca persistidas).
+  // Traslados" (para desviar el intake) + órdenes (persistidas con reemplazo
+  // cíclico, para sobrevivir un F5).
   const [tiposInstalaciones, setTiposInstalaciones] = useState<Set<string>>(new Set())
   const [serviciosInstalaciones, setServiciosInstalaciones] = useState<ServicioNuevo[]>([])
   // Novedades de instalación persistidas, indexadas por número de orden.
@@ -115,6 +118,7 @@ function App() {
           noDespachables,
           tiposInstalacionesData,
           novedadesData,
+          instalacionesData,
         ] = await Promise.all([
           getTecnicos(),
           getReglas(),
@@ -126,6 +130,8 @@ function App() {
           obtenerTiposInstalaciones().catch(() => null),
           // Tolerante: la tabla de novedades puede no existir (migración pendiente).
           obtenerNovedadesInstalaciones(),
+          // Persistencia cíclica: recupera las instalaciones tras un F5.
+          obtenerInstalacionesActivas(),
         ])
 
         setTecnicos(tecnicosData)
@@ -136,6 +142,9 @@ function App() {
         setTiposNoDespachables(noDespachables ?? new Set<string>())
         setTiposInstalaciones(tiposInstalacionesData ?? new Set<string>())
         setNovedadesInstalaciones(novedadesData)
+        // Hidratación tras un F5: solo si el tablero aún no tiene un reporte
+        // de esta sesión (un Excel recién subido es más reciente).
+        setServiciosInstalaciones((prev) => (prev.length > 0 ? prev : instalacionesData))
         setConexion('conectado')
       } catch (error) {
         // Nunca se propaga: la app sigue montada y muestra el estado de error.
@@ -302,6 +311,21 @@ function App() {
 
         // Se reemplaza el universo de instalaciones con el del reporte vigente.
         setServiciosInstalaciones(instalaciones)
+
+        // Persistencia cíclica en segundo plano: el tablero NO espera a que
+        // Supabase responda, pero un fallo se avisa (sin romper el despacho).
+        void reemplazarInstalacionesActivas(instalaciones)
+          .then((n) => {
+            console.log(`[Instalaciones] Persistidas ${n} órdenes en Supabase.`)
+          })
+          .catch((error: unknown) => {
+            notificar(
+              error instanceof Error
+                ? `Instalaciones guardadas solo en memoria: ${error.message}`
+                : 'Instalaciones guardadas solo en memoria (fallo de Supabase).',
+              'error',
+            )
+          })
 
         if (abiertos.length === 0 && cerrados.length === 0) {
           notificar(
