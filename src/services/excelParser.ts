@@ -1,6 +1,7 @@
 import { differenceInCalendarDays } from 'date-fns'
 import * as XLSX from 'xlsx'
 import type { FilaMatrizImport, ServicioNuevo } from '../types'
+import { limpiarTexto } from '../lib/normalizer'
 import { esSucursalAutorizada } from '../lib/zonasPermitidas'
 
 // Campos que pueden venir mapeados desde las columnas del Excel (reporte Sigma).
@@ -208,6 +209,19 @@ export function clasificarEstadoSigma(estado: string | undefined): EstadoSigmaNo
 }
 
 /**
+ * ¿La orden está explícitamente en estado "Nueva" o "Pendiente" en Sigma?
+ *
+ * A diferencia de `clasificarEstadoSigma` (que trata el vacío como abierta por
+ * retrocompatibilidad), aquí solo cuenta el texto literal: el Control de
+ * Instalaciones debe listar órdenes con estado conocido, no las de estado
+ * vacío o desconocido.
+ */
+export function estaNuevaOPendiente(estado: string | undefined): boolean {
+  const clave = normalizarClave(estado ?? '')
+  return clave === 'nueva' || clave === 'pendiente'
+}
+
+/**
  * Recorre las filas del reporte Sigma y construye TODOS los servicios (abiertos
  * y cerrados) sin clasificarlos. Es la base compartida por las API públicas.
  */
@@ -312,51 +326,87 @@ async function parseServiciosInterno(
 export interface ParseoSigma {
   abiertos: ServicioNuevo[]
   cerrados: ServicioNuevo[]
+  /**
+   * Órdenes de instalación (estado 'Nueva'/'Pendiente' + categoría
+   * "Instalaciones y Traslados"). NO se persisten en `servicios`: las consume el
+   * Control de Instalaciones en memoria.
+   */
+  instalaciones: ServicioNuevo[]
+}
+
+/** Opciones de parseo; `tiposInstalaciones` desvía esas órdenes al módulo de instalaciones. */
+export interface OpcionesParseoSigma {
+  ciudadFiltro?: string
+  /**
+   * Claves normalizadas (`limpiarTexto(tipo_servicio)`) de la categoría
+   * "Instalaciones y Traslados". Si no se pasa, el ruteo queda inactivo.
+   */
+  tiposInstalaciones?: ReadonlySet<string>
 }
 
 /**
- * Lee un reporte Sigma y bifurca las órdenes según `Estado en Sigma`:
- * las cerradas van a `cerrados` (solo auditoría) y el resto a `abiertos`.
+ * Lee un reporte Sigma y bifurca las órdenes en tres destinos:
+ *
+ *   - `instalaciones`: estado 'Nueva'/'Pendiente' y tipo de la categoría
+ *     "Instalaciones y Traslados" (solo memoria, nunca se persisten).
+ *   - `cerrados`: estado cerrado (solo auditoría).
+ *   - `abiertos`: el resto, candidatas al despacho.
  *
  * Un estado vacío/desconocido se trata como abierto para no perder datos.
  */
 export async function parseServiciosSigma(
   file: File,
-  ciudadFiltro?: string,
+  opciones: OpcionesParseoSigma | string = {},
 ): Promise<ParseoSigma> {
+  // Retrocompatible: el segundo argumento era la ciudad como string.
+  const { ciudadFiltro, tiposInstalaciones } =
+    typeof opciones === 'string' ? { ciudadFiltro: opciones } : opciones
+
   const { servicios, descartadas } = await parseServiciosInterno(file, ciudadFiltro)
 
   const abiertos: ServicioNuevo[] = []
   const cerrados: ServicioNuevo[] = []
+  const instalaciones: ServicioNuevo[] = []
 
   for (const servicio of servicios) {
     if (clasificarEstadoSigma(servicio.estado_sigma) === 'cerrada') {
       cerrados.push(servicio)
+      continue
+    }
+
+    // Ruteo a instalaciones ANTES del despacho: estas órdenes no deben
+    // terminar ni en `servicios` ni en la matriz de asignación.
+    const esInstalacion =
+      tiposInstalaciones?.has(limpiarTexto(servicio.tipo_servicio)) === true &&
+      estaNuevaOPendiente(servicio.estado_sigma)
+
+    if (esInstalacion) {
+      instalaciones.push(servicio)
     } else {
       abiertos.push(servicio)
     }
   }
 
   console.log(
-    `[Parser] Órdenes leídas de tu zona: ${servicios.length} | Descartadas de otras zonas: ${descartadas} | Abiertas: ${abiertos.length} | Cerradas: ${cerrados.length}`,
+    `[Parser] Órdenes leídas de tu zona: ${servicios.length} | Descartadas de otras zonas: ${descartadas} | Abiertas: ${abiertos.length} | Cerradas: ${cerrados.length} | Instalaciones: ${instalaciones.length}`,
   )
 
-  return { abiertos, cerrados }
+  return { abiertos, cerrados, instalaciones }
 }
 
 /**
  * Lee un archivo Excel (.xlsx/.xls) y lo transforma en servicios listos para
  * asignar. Devuelve servicios con `estado: 'ABIERTO'` y `tecnico_id: null`.
  *
- * Retrocompatible: concatena abiertos + cerrados para los llamadores que
- * necesitan el universo completo (p. ej. la auditoría de cierres).
+ * Retrocompatible: concatena abiertos + cerrados + instalaciones para los
+ * llamadores que necesitan el universo completo (p. ej. la auditoría de cierres).
  */
 export async function parseServiciosExcel(
   file: File,
   ciudadFiltro?: string,
 ): Promise<ServicioNuevo[]> {
-  const { abiertos, cerrados } = await parseServiciosSigma(file, ciudadFiltro)
-  return [...abiertos, ...cerrados]
+  const { abiertos, cerrados, instalaciones } = await parseServiciosSigma(file, ciudadFiltro)
+  return [...abiertos, ...cerrados, ...instalaciones]
 }
 
 // ---- Parseo de la matriz de asignación (importación masiva) ----

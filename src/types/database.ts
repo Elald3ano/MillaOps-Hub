@@ -288,6 +288,39 @@ export type Database = {
         }
         Relationships: []
       }
+      novedades_instalaciones: {
+        Row: {
+          orden_id: string
+          tipo_novedad: string
+          caja_nap: string | null
+          comentario: string | null
+          estado_gestion: string
+          usuario: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          orden_id: string
+          tipo_novedad: string
+          caja_nap?: string | null
+          comentario?: string | null
+          estado_gestion?: string
+          usuario?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          orden_id?: string
+          tipo_novedad?: string
+          caja_nap?: string | null
+          comentario?: string | null
+          estado_gestion?: string
+          usuario?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: Record<string, never>
     Functions: Record<string, never>

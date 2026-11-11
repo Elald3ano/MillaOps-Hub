@@ -108,3 +108,48 @@ export interface AsignacionServicio {
   /** true si el tipo no existe en mapeo_servicios (fail-open → entra al despacho). */
   sin_clasificar: boolean
 }
+
+// ---- Control de Instalaciones y Puertos ----
+
+/** Motivo de bloqueo de una orden de instalación. */
+export type TipoNovedadInstalacion =
+  | 'pendiente_puerto'
+  | 'ampliacion_nap'
+  | 'sin_cobertura'
+  | 'cliente_no_contacta'
+  | 'otra'
+
+/** Estado del seguimiento de la novedad. */
+export type EstadoGestionNovedad = 'pendiente' | 'en_gestion' | 'resuelto'
+
+/**
+ * Novedad vigente de una orden de instalación (tabla `novedades_instalaciones`).
+ * `orden_id` es el número de orden de Sigma y actúa como clave única: una orden
+ * tiene como máximo una novedad, que se sobrescribe con cada guardado.
+ */
+export interface NovedadInstalacion {
+  orden_id: string
+  tipo_novedad: TipoNovedadInstalacion
+  caja_nap?: string
+  comentario?: string
+  estado_gestion: EstadoGestionNovedad
+  usuario?: string
+  created_at: string
+  updated_at: string
+}
+
+/** Datos editables al registrar una novedad (sin marcas de tiempo). */
+export type EntradaNovedadInstalacion = Pick<
+  NovedadInstalacion,
+  'orden_id' | 'tipo_novedad' | 'estado_gestion'
+> &
+  Partial<Pick<NovedadInstalacion, 'caja_nap' | 'comentario' | 'usuario'>>
+
+/** Etiqueta de un tipo de novedad: icono + texto para badges y filtros. */
+export interface EtiquetaNovedad {
+  tipo: TipoNovedadInstalacion
+  icono: string
+  etiqueta: string
+  descripcion: string
+}
+

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BarChart3, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, TrendingUp, WifiOff } from 'lucide-react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { BarChart3, Boxes, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, TrendingUp, WifiOff } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
@@ -12,23 +12,35 @@ import { aplicarMatrizAsignacion } from './services/assignmentEngine'
 import { isSupabaseConfigured } from './lib/supabase'
 import {
   actualizarCategoriaServicio,
+  eliminarNovedadInstalacion,
   getCiudadesActivas,
   getReglas,
   getServiciosActivos,
   getTecnicos,
   getUltimaAuditoriaCierres,
+  guardarNovedadInstalacion,
   obtenerCategoriasServicios,
+  obtenerNovedadesInstalaciones,
+  obtenerTiposInstalaciones,
   obtenerTiposNoDespachables,
   reasignarServiciosActivos,
   reemplazarServiciosActivos,
 } from './services/supabaseService'
-import type { CategoriaConServicios, ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
+import type { CategoriaConServicios, EntradaNovedadInstalacion, NovedadInstalacion, ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
 import type { ResultadoCierres } from './services/reconciliationService'
 import { cn } from './lib/utils'
 import { limpiarTexto } from './lib/normalizer'
 
 type EstadoConexion = 'conectando' | 'conectado' | 'error'
-type VistaPrincipal = 'centro_mando' | 'territorio' | 'cierres'
+type VistaPrincipal = 'centro_mando' | 'instalaciones' | 'territorio' | 'cierres'
+
+// El Control de Instalaciones se carga solo al abrir su pestaña, para no
+// inflar el bundle inicial (el resto de la app no depende de este módulo).
+const ControlInstalaciones = lazy(() =>
+  import('./components/instalaciones/ControlInstalaciones').then((m) => ({
+    default: m.ControlInstalaciones,
+  })),
+)
 
 const MAX_TOASTS = 4
 
@@ -42,6 +54,14 @@ function App() {
   // Categorización de intake (fail-open): categorías + tipos excluidos del despacho.
   const [categorias, setCategorias] = useState<CategoriaConServicios[]>([])
   const [tiposNoDespachables, setTiposNoDespachables] = useState<Set<string>>(new Set())
+  // Control de Instalaciones: claves de tipos de la categoría "Instalaciones y
+  // Traslados" (para desviar el intake) + órdenes en memoria (nunca persistidas).
+  const [tiposInstalaciones, setTiposInstalaciones] = useState<Set<string>>(new Set())
+  const [serviciosInstalaciones, setServiciosInstalaciones] = useState<ServicioNuevo[]>([])
+  // Novedades de instalación persistidas, indexadas por número de orden.
+  const [novedadesInstalaciones, setNovedadesInstalaciones] = useState<
+    Map<string, NovedadInstalacion>
+  >(new Map())
 
   // UI
   const [cargando, setCargando] = useState(true)
@@ -93,6 +113,8 @@ function App() {
           ciudadesData,
           categoriasData,
           noDespachables,
+          tiposInstalacionesData,
+          novedadesData,
         ] = await Promise.all([
           getTecnicos(),
           getReglas(),
@@ -101,6 +123,9 @@ function App() {
           // Defensivo: si la migración de categorización aún no existe, no rompe la carga.
           obtenerCategoriasServicios().catch(() => null),
           obtenerTiposNoDespachables().catch(() => null),
+          obtenerTiposInstalaciones().catch(() => null),
+          // Tolerante: la tabla de novedades puede no existir (migración pendiente).
+          obtenerNovedadesInstalaciones(),
         ])
 
         setTecnicos(tecnicosData)
@@ -109,6 +134,8 @@ function App() {
         setCiudadesActivas(ciudadesData)
         setCategorias(categoriasData ?? [])
         setTiposNoDespachables(noDespachables ?? new Set<string>())
+        setTiposInstalaciones(tiposInstalacionesData ?? new Set<string>())
+        setNovedadesInstalaciones(novedadesData)
         setConexion('conectado')
       } catch (error) {
         // Nunca se propaga: la app sigue montada y muestra el estado de error.
@@ -265,17 +292,27 @@ function App() {
 
       try {
         // 1. Parseo del Excel con bifurcación abiertas/cerradas (xlsx diferido).
+        //    Las órdenes de "Instalaciones y Traslados" se desvían al módulo de
+        //    instalaciones y NO se persisten en `servicios` (protege la cuota).
         const { parseServiciosSigma } = await import('./services/excelParser')
-        const { abiertos, cerrados } = await parseServiciosSigma(file, ciudadFiltro)
+        const { abiertos, cerrados, instalaciones } = await parseServiciosSigma(file, {
+          ciudadFiltro,
+          tiposInstalaciones,
+        })
+
+        // Se reemplaza el universo de instalaciones con el del reporte vigente.
+        setServiciosInstalaciones(instalaciones)
 
         if (abiertos.length === 0 && cerrados.length === 0) {
           notificar(
-            ciudadFiltro
-              ? `No se encontraron servicios para la ciudad "${ciudadFiltro}".`
-              : 'El archivo no contiene servicios válidos.',
-            'error',
+            instalaciones.length > 0
+              ? `El archivo solo contiene ${instalaciones.length} instalaciones: revisa el Control de Instalaciones.`
+              : ciudadFiltro
+                ? `No se encontraron servicios para la ciudad "${ciudadFiltro}".`
+                : 'El archivo no contiene servicios válidos.',
+            instalaciones.length > 0 ? 'info' : 'error',
           )
-          return false
+          return instalaciones.length > 0
         }
 
         // Solo hay cerradas: se conservan para auditoría sin tocar Supabase.
@@ -323,7 +360,7 @@ function App() {
 
         const asignadosCount = asignados.filter((s) => s.tecnico_id !== null).length
         notificar(
-          `Despacho listo: ${asignados.length} órdenes abiertas (${asignadosCount} asignadas) · ${cerrados.length} cerradas en auditoría${omitidos > 0 ? ` · ${omitidos} omitidas por categoría` : ''}.`,
+          `Despacho listo: ${asignados.length} órdenes abiertas (${asignadosCount} asignadas) · ${cerrados.length} cerradas en auditoría${instalaciones.length > 0 ? ` · ${instalaciones.length} instalaciones desviadas` : ''}${omitidos > 0 ? ` · ${omitidos} omitidas por categoría` : ''}.`,
           'success',
         )
         return true
@@ -337,8 +374,31 @@ function App() {
         setProcesando(false)
       }
     },
-    [reglas, cargarDatos, notificar, tiposNoDespachables],
+    [reglas, cargarDatos, notificar, tiposNoDespachables, tiposInstalaciones],
   )
+
+  // Guarda (upsert) una novedad de instalación y actualiza el mapa en memoria.
+  const handleGuardarNovedad = useCallback(
+    async (entrada: EntradaNovedadInstalacion) => {
+      const guardada = await guardarNovedadInstalacion(entrada)
+      setNovedadesInstalaciones((prev) => {
+        const siguiente = new Map(prev)
+        siguiente.set(guardada.orden_id, guardada)
+        return siguiente
+      })
+    },
+    [],
+  )
+
+  // Elimina la novedad de una orden (bloqueo superado) y la quita del mapa.
+  const handleEliminarNovedad = useCallback(async (ordenId: string) => {
+    await eliminarNovedadInstalacion(ordenId)
+    setNovedadesInstalaciones((prev) => {
+      const siguiente = new Map(prev)
+      siguiente.delete(ordenId)
+      return siguiente
+    })
+  }, [])
 
   const conexionInfo =
     conexion === 'conectado'
@@ -474,10 +534,11 @@ function App() {
         ) : (
           <>
             {/* Pestañas principales */}
-            <nav className="flex w-fit gap-1 rounded-xl bg-white p-1 shadow-sm ring-1 ring-slate-200">
+            <nav className="flex w-fit flex-wrap gap-1 rounded-xl bg-white p-1 shadow-sm ring-1 ring-slate-200">
               {(
                 [
                   { id: 'centro_mando', label: 'Centro de Mando', icon: BarChart3 },
+                  { id: 'instalaciones', label: 'Control de Instalaciones', icon: Boxes },
                   { id: 'territorio', label: 'Gestión Territorial', icon: MapIcon },
                   { id: 'cierres', label: 'Auditoría de Cierres', icon: TrendingUp },
                 ] as const
@@ -512,6 +573,27 @@ function App() {
                 notificar={notificar}
                 resultadoCierres={resultadoCierres}
               />
+            ) : vistaActiva === 'instalaciones' ? (
+              <Suspense
+                fallback={
+                  <div className="flex min-h-[40vh] flex-col items-center justify-center gap-3 text-slate-500">
+                    <RefreshCw className="size-6 animate-spin" />
+                    <p className="text-sm">Cargando Control de Instalaciones…</p>
+                  </div>
+                }
+              >
+                <ControlInstalaciones
+                  servicios={serviciosInstalaciones}
+                  novedades={novedadesInstalaciones}
+                  reglas={reglas}
+                  tecnicos={tecnicos}
+                  onGuardarNovedad={handleGuardarNovedad}
+                  onEliminarNovedad={handleEliminarNovedad}
+                  onProcesarReporte={handleProcesar}
+                  procesando={procesando}
+                  notificar={notificar}
+                />
+              </Suspense>
             ) : vistaActiva === 'cierres' ? (
               <AuditoriaCierresDashboard
                 serviciosActivos={serviciosActivos}

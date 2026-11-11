@@ -7,8 +7,11 @@ import type {
   CategoriaConServicios,
   CategoriaServicio,
   ConfigCuadrilla,
+  EntradaNovedadInstalacion,
+  EstadoGestionNovedad,
   FilaMatrizImport,
   MapeoServicio,
+  NovedadInstalacion,
   NuevaRegla,
   ReglaAsignacion,
   ReglaConTecnico,
@@ -16,6 +19,7 @@ import type {
   Servicio,
   ServicioNuevo,
   Tecnico,
+  TipoNovedadInstalacion,
 } from '../types'
 
 type TecnicoRow = Database['public']['Tables']['tecnicos']['Row']
@@ -26,6 +30,9 @@ type AuditoriaCierresInsert = Database['public']['Tables']['auditorias_cierres']
 type CategoriaRow = Database['public']['Tables']['categorias_servicios']['Row']
 type CategoriaInsert = Database['public']['Tables']['categorias_servicios']['Insert']
 type MapeoServicioRow = Database['public']['Tables']['mapeo_servicios']['Row']
+type NovedadInstalacionRow = Database['public']['Tables']['novedades_instalaciones']['Row']
+type NovedadInstalacionInsert =
+  Database['public']['Tables']['novedades_instalaciones']['Insert']
 
 // Supabase limita el payload de una inserción; se particiona en lotes de 500.
 const TAMANO_LOTE_INSERCION = 500
@@ -1052,6 +1059,141 @@ export async function obtenerTiposNoDespachables(): Promise<Set<string>> {
       const clave = limpiarTexto(mapeo.tipo_solicitud)
       if (clave) claves.add(clave)
     }
+  }
+  return claves
+}
+
+// ---- Control de Instalaciones y Puertos ----
+
+const TIPOS_NOVEDAD: readonly TipoNovedadInstalacion[] = [
+  'pendiente_puerto',
+  'ampliacion_nap',
+  'sin_cobertura',
+  'cliente_no_contacta',
+  'otra',
+]
+
+const ESTADOS_GESTION: readonly EstadoGestionNovedad[] = ['pendiente', 'en_gestion', 'resuelto']
+
+/** Tolera valores fuera de dominio (fila editada a mano): cae a `otra`. */
+function normalizarTipoNovedad(valor: string | null): TipoNovedadInstalacion {
+  return TIPOS_NOVEDAD.includes(valor as TipoNovedadInstalacion)
+    ? (valor as TipoNovedadInstalacion)
+    : 'otra'
+}
+
+/** Tolera valores fuera de dominio: cae a `pendiente` (estado inicial). */
+function normalizarEstadoGestion(valor: string | null): EstadoGestionNovedad {
+  return ESTADOS_GESTION.includes(valor as EstadoGestionNovedad)
+    ? (valor as EstadoGestionNovedad)
+    : 'pendiente'
+}
+
+function mapNovedadInstalacion(row: NovedadInstalacionRow): NovedadInstalacion {
+  return {
+    orden_id: row.orden_id,
+    tipo_novedad: normalizarTipoNovedad(row.tipo_novedad),
+    caja_nap: row.caja_nap ?? undefined,
+    comentario: row.comentario ?? undefined,
+    estado_gestion: normalizarEstadoGestion(row.estado_gestion),
+    usuario: row.usuario ?? undefined,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }
+}
+
+/**
+ * Carga TODAS las novedades de instalación indexadas por número de orden.
+ *
+ * Tolerante a fallos: si la migración aún no se ejecutó (tabla inexistente),
+ * devuelve un mapa vacío y registra el aviso, en lugar de romper el módulo.
+ */
+export async function obtenerNovedadesInstalaciones(): Promise<Map<string, NovedadInstalacion>> {
+  const resultado = await leerTodasLasFilas<NovedadInstalacionRow>((desde, hasta) =>
+    supabase.from('novedades_instalaciones').select('*').order('orden_id').range(desde, hasta),
+  )
+
+  const mapa = new Map<string, NovedadInstalacion>()
+  if (resultado.error) {
+    console.warn('[obtenerNovedadesInstalaciones] Novedades no disponibles:', resultado.error.message)
+    return mapa
+  }
+
+  for (const fila of resultado.data) {
+    mapa.set(fila.orden_id, mapNovedadInstalacion(fila))
+  }
+  return mapa
+}
+
+/**
+ * Crea o reemplaza la novedad de una orden (upsert por `orden_id`).
+ *
+ * Una orden tiene una sola novedad vigente: guardar de nuevo sobrescribe tipo,
+ * caja, comentario y estado. `created_at` se preserva del registro original
+ * (solo lo fija la base de datos al insertar; en actualizaciones no se envía).
+ */
+export async function guardarNovedadInstalacion(
+  novedad: EntradaNovedadInstalacion,
+): Promise<NovedadInstalacion> {
+  const ordenId = novedad.orden_id.trim()
+  if (!ordenId) throw new Error('La orden no puede estar vacía al registrar la novedad.')
+
+  const cajaNap = novedad.caja_nap?.trim() ?? ''
+  const comentario = novedad.comentario?.trim() ?? ''
+  const usuario = novedad.usuario?.trim() ?? ''
+
+  const fila: NovedadInstalacionInsert = {
+    orden_id: ordenId,
+    tipo_novedad: novedad.tipo_novedad,
+    caja_nap: cajaNap || null,
+    comentario: comentario || null,
+    estado_gestion: novedad.estado_gestion,
+    usuario: usuario || null,
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data, error } = await supabase
+    .from('novedades_instalaciones')
+    .upsert(fila, { onConflict: 'orden_id', ignoreDuplicates: false })
+    .select('*')
+    .single()
+
+  if (error) throw new Error(`No se pudo guardar la novedad de la orden ${ordenId}: ${error.message}`)
+  if (!data) throw new Error('No se recibió confirmación al guardar la novedad.')
+
+  return mapNovedadInstalacion(data)
+}
+
+/** Elimina la novedad de una orden (cuando el bloqueo quedó superado). */
+export async function eliminarNovedadInstalacion(ordenId: string): Promise<void> {
+  const clave = ordenId.trim()
+  if (!clave) throw new Error('La orden no puede estar vacía al eliminar la novedad.')
+
+  const { error } = await supabase.from('novedades_instalaciones').delete().eq('orden_id', clave)
+  if (error) throw new Error(`No se pudo eliminar la novedad de la orden ${clave}: ${error.message}`)
+}
+
+/** Nombre canónico de la categoría que se enruta al Control de Instalaciones. */
+export const CATEGORIA_INSTALACIONES = 'Instalaciones y Traslados'
+
+/**
+ * Tipos de servicio (`limpiarTexto(tipo_solicitud)`) que pertenecen a la
+ * categoría "Instalaciones y Traslados". El intake los desvía al módulo de
+ * instalaciones en lugar de persistirlos en `servicios` (protege la cuota).
+ *
+ * Si la categoría no existe (migración de categorización pendiente) devuelve un
+ * set vacío: el intake sigue funcionando y esas órdenes se omiten como antes.
+ */
+export async function obtenerTiposInstalaciones(): Promise<Set<string>> {
+  const categorias = await obtenerCategoriasServicios()
+  const objetivo = limpiarTexto(CATEGORIA_INSTALACIONES)
+  const categoria = categorias.find((c) => limpiarTexto(c.nombre) === objetivo)
+
+  const claves = new Set<string>()
+  if (!categoria) return claves
+  for (const mapeo of categoria.tipos_servicio) {
+    const clave = limpiarTexto(mapeo.tipo_solicitud)
+    if (clave) claves.add(clave)
   }
   return claves
 }
