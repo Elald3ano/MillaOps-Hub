@@ -88,13 +88,14 @@ const ESTILOS_HEAD: UserOptions['headStyles'] = {
 }
 
 // 6 columnas · 194 mm útiles (210 mm A4 − 8 mm × 2).
-// Barrio/Dirección es la más ancha para evitar saltos de línea excesivos.
+// Barrio/Dirección y Cliente concentran el texto largo: suman 106 mm para que
+// ambas respiren sin que un número suelto (p. ej. "65") salte a otra línea.
 const ANCHOS_COLUMNAS: UserOptions['columnStyles'] = {
   0: { cellWidth: 13, halign: 'center', fontStyle: 'bold' },
   1: { cellWidth: 21, textColor: COLOR_TEXTO_OSCURO },
   2: { cellWidth: 24, fontStyle: 'bold' },
-  3: { cellWidth: 54 },
-  4: { cellWidth: 52 },
+  3: { cellWidth: 51 },
+  4: { cellWidth: 55 },
   5: { cellWidth: 30 },
 }
 
@@ -106,11 +107,6 @@ const CABECERAS = [
   'Cliente / Teléfono / Ref. Pago',
   'Tipo de Servicio',
 ]
-
-/** Une partes no vacías con " / " para celdas compuestas del PDF. */
-function unir(...partes: Array<string | undefined>): string {
-  return partes.filter((p): p is string => Boolean(p)).join(' / ')
-}
 
 // ---- Formateo de fecha local (sin depender de date-fns en el chunk pesado) ----
 function formatearFecha(fecha: Date): string {
@@ -191,22 +187,19 @@ function dibujarEncabezado(doc: jsPDF, grupo: PlanillaTecnico, opciones: Opcione
 }
 
 /**
- * Dibuja la celda compuesta de "Cliente" con tipografía mixta: nombre en
- * negrita 8 pt y teléfono/referencia en 7 pt (gris con contraste).
+ * Dibuja la celda compuesta de "Cliente" con jerarquía semántica de 3 líneas:
  *
- * El bloque se compone con un paso de línea explícito (`PASO_LINEA`) en lugar
- * del interlineado natural de la fuente: así el nombre y sus detalles quedan
- * visualmente cohesionados y la fila no se infla cuando el detalle ocupa más
- * de una línea.
+ *   1. Nombre del cliente (negrita 8 pt)
+ *   2. `Tel: … · Ref: …` (7 pt, gris de detalle)
+ *   3. `CC: …` (7 pt) — solo si hay identificación
+ *
+ * El bloque usa un paso explícito (`PASO_LINEA`) para no depender del
+ * interlineado natural: 3 líneas caben con holgura en los ~10 mm que la fila
+ * ya reserva por el tipo de servicio, sin desplazar la línea divisoria.
  */
 function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   const F_NOMBRE = 8
   const F_DETALLE = 7
-  const F_DETALLE_MIN = 6
-  const PASO_REDUCCION = 0.25
-  // Paso vertical entre líneas del bloque (mm). El interlineado natural de
-  // jspdf-autotable era ~3.25 mm; aquí se fija explícitamente para que sea
-  // constante aunque cambie el tamaño de fuente del detalle (7 pt → 6 pt).
   const PASO_LINEA = 3.3
   const FACTOR_LINEA = 1.15 // coincide con jspdf-autotable (PHYSICAL_LINE_HEIGHT)
   const aMm = (pt: number) => (pt * 25.4) / 72
@@ -241,34 +234,63 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(...COLOR_DETALLE)
   for (let i = 1; i < lineas.length; i++) {
-    let texto = lineas[i] ?? ''
-    let tamano = F_DETALLE
-    doc.setFontSize(tamano)
-
-    // Reduce progresivamente la tipografía del detalle hasta que quepa.
-    while (tamano > F_DETALLE_MIN && doc.getTextWidth(texto) > anchoUtil) {
-      tamano = Math.max(F_DETALLE_MIN, tamano - PASO_REDUCCION)
-      doc.setFontSize(tamano)
+    const ajustada = ajustarTextoDetalle(doc, lineas[i] ?? '', anchoUtil)
+    if (!ajustada.texto) {
+      base += PASO_LINEA
+      continue
     }
-
-    // Si aún no cabe al tamaño mínimo, trunca con puntos suspensivos.
-    if (doc.getTextWidth(texto) > anchoUtil) {
-      const ELLIPSIS = '…'
-      while (texto.length > 0 && doc.getTextWidth(texto + ELLIPSIS) > anchoUtil) {
-        texto = texto.slice(0, -1)
-      }
-      texto =
-        texto.length > 0
-          ? `${texto}${ELLIPSIS}`
-          : doc.getTextWidth(ELLIPSIS) <= anchoUtil
-            ? ELLIPSIS
-            : ''
-    }
-
-    doc.text(texto, x, base)
-    doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente línea
+    // Se dibuja con el tamaño con el que se midió: si la reducción a 6-7 pt
+    // se descartara aquí, el texto que "cabía" desbordaría la columna.
+    doc.setFontSize(ajustada.tamano)
+    doc.text(ajustada.texto, x, base)
     base += PASO_LINEA
   }
+  doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente celda
+}
+
+/**
+ * Ajusta una línea de detalle al ancho disponible: reduce la tipografía hasta
+ * `F_DETALLE_MIN` y, si aún no cabe, trunca con puntos suspensivos.
+ *
+ * Devuelve también el tamaño con el que se midió para que el llamador dibuje
+ * exactamente a esa escala (de lo contrario la protección de ancho no vale).
+ */
+function ajustarTextoDetalle(
+  doc: jsPDF,
+  original: string,
+  anchoUtil: number,
+): { texto: string; tamano: number } {
+  const F_DETALLE = 7
+  const F_DETALLE_MIN = 6
+  const PASO_REDUCCION = 0.25
+
+  let texto = original
+  let tamano = F_DETALLE
+  doc.setFontSize(tamano)
+
+  while (tamano > F_DETALLE_MIN && doc.getTextWidth(texto) > anchoUtil) {
+    tamano = Math.max(F_DETALLE_MIN, tamano - PASO_REDUCCION)
+    doc.setFontSize(tamano)
+  }
+
+  if (doc.getTextWidth(texto) > anchoUtil) {
+    // El truncado se mide a F_DETALLE_MIN: es el tamaño más pequeño con el que
+    // se dibujará, así que garantiza que quepa.
+    doc.setFontSize(F_DETALLE_MIN)
+    tamano = F_DETALLE_MIN
+    const ELLIPSIS = '…'
+    while (texto.length > 0 && doc.getTextWidth(texto + ELLIPSIS) > anchoUtil) {
+      texto = texto.slice(0, -1)
+    }
+    texto =
+      texto.length > 0
+        ? `${texto}${ELLIPSIS}`
+        : doc.getTextWidth(ELLIPSIS) <= anchoUtil
+          ? ELLIPSIS
+          : ''
+  }
+
+  return { texto, tamano }
 }
 
 /**
@@ -331,13 +353,19 @@ function dibujarTabla(
       String(s.dias_antiguedad),
       s.numero_orden,
       s.ciudad,
-      unir(s.barrio, s.direccion),
+      // Barrio y dirección en líneas distintas: la dirección fluye sola en las
+      // líneas 2-3 sin que un número suelto (p. ej. "65") quede huérfano.
+      [s.barrio || '—', s.direccion || ''].filter(Boolean).join('\n'),
+      // Jerarquía semántica: nombre / (Tel · Ref) / CC.
       [
         s.nombre_cliente || 'SIN NOMBRE',
-        `Tel: ${s.telefono_cliente || 'S/T'} · Ref: ${s.referencia_pago || 'S/R'}${
-          s.identificacion ? ` · CC: ${s.identificacion}` : ''
-        }`,
-      ].join('\n'),
+        [s.telefono_cliente ? `Tel: ${s.telefono_cliente}` : '', `Ref: ${s.referencia_pago || 'S/R'}`]
+          .filter(Boolean)
+          .join(' · '),
+        s.identificacion ? `CC: ${s.identificacion}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
       s.tipo_servicio,
     ]),
     margin: { left: MARGEN_TABLA, right: MARGEN_TABLA, bottom: 26 },
