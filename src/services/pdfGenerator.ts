@@ -88,15 +88,15 @@ const ESTILOS_HEAD: UserOptions['headStyles'] = {
 }
 
 // 6 columnas · 194 mm útiles (210 mm A4 − 8 mm × 2).
-// Barrio/Dirección y Cliente concentran el texto largo: suman 106 mm para que
-// ambas respiren sin que un número suelto (p. ej. "65") salte a otra línea.
+// Cliente recibe 60 mm para que Tel + Ref + CC convivan en una sola línea sin
+// que ningún dato se descarte; Barrio/Dirección conserva 48 mm para la dirección.
 const ANCHOS_COLUMNAS: UserOptions['columnStyles'] = {
-  0: { cellWidth: 13, halign: 'center', fontStyle: 'bold' },
-  1: { cellWidth: 21, textColor: COLOR_TEXTO_OSCURO },
-  2: { cellWidth: 24, fontStyle: 'bold' },
-  3: { cellWidth: 51 },
-  4: { cellWidth: 55 },
-  5: { cellWidth: 30 },
+  0: { cellWidth: 12, halign: 'center', fontStyle: 'bold' },
+  1: { cellWidth: 20, textColor: COLOR_TEXTO_OSCURO },
+  2: { cellWidth: 22, fontStyle: 'bold' },
+  3: { cellWidth: 48 },
+  4: { cellWidth: 60 },
+  5: { cellWidth: 32 },
 }
 
 const CABECERAS = [
@@ -244,20 +244,18 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
     nombreLinea2 = partes[1]
   }
 
-  // ---- 2. Componer las líneas finales con condicionales limpios ----
-  // Regla de oro: la REREFERENCIA nunca se corta. Si el contacto completo no
-  // cabe, se omite el teléfono entero antes que truncar la Ref (antes el
-  // truncador se comía el número y dejaba "Ref:" huérfano al final del texto).
+  // ---- 2. Líneas deterministas: ningún dato se descarta jamás ----
   const lineasFinales: Array<{ texto: string; tamano: number; esNombre: boolean }> = [
     { texto: nombreLinea1, tamano: tamanoNombre, esNombre: true },
   ]
-
-  // Contacto de la línea 2: "Tel: X · Ref: Y" recortando por prioridad.
-  const contacto = componerContacto(doc, datos.telefono, datos.ref, anchoUtil)
+  // Con 60 mm de columna (56 mm útiles) Tel + Ref caben en una línea en el
+  // 100 % de los casos reales. Si un valor es extremo, `ajustarTextoDetalle`
+  // reduce hasta 6 pt antes de truncar, pero NUNCA se omite un campo entero.
+  const contacto = [datos.telefono, datos.ref].filter(Boolean).join(' · ')
 
   if (nombreLinea2) {
-    // Nombre partido: el resto del nombre comparte L2 con el contacto (deja
-    // mucho aire horizontal libre) y L3 agrupa Ref + CC.
+    // Nombre partido: el resto del apellido comparte L2 con el contacto y la
+    // CC baja a L3. Sigue siendo 3 líneas y no se pierde nada.
     const sufijo = [nombreLinea2, contacto].filter(Boolean).join(' · ')
     lineasFinales.push({ texto: sufijo, tamano: F_DETALLE, esNombre: false })
     lineasFinales.push({
@@ -267,9 +265,7 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
     })
   } else {
     lineasFinales.push({ texto: contacto, tamano: F_DETALLE, esNombre: false })
-    if (datos.cc) {
-      lineasFinales.push({ texto: datos.cc, tamano: F_DETALLE, esNombre: false })
-    }
+    lineasFinales.push({ texto: datos.cc, tamano: F_DETALLE, esNombre: false })
   }
 
   const visibles = lineasFinales.filter((l) => l.texto)
@@ -300,32 +296,6 @@ function dibujarCeldaCliente(doc: jsPDF, cell: Cell, lineas: string[]): void {
     base += PASO_LINEA
   }
   doc.setFontSize(F_DETALLE) // restaura para no contaminar la siguiente celda
-}
-
-/**
- * Compone la línea de contacto dando prioridad a la referencia.
- *
- * - Ambos datos: `Tel: X · Ref: Y`; si no cabe, **se omite el teléfono** y se
- *   conserva `Ref: Y` completa (la referencia es el dato crítico de cobro).
- * - Solo uno: se emite únicamente ese, sin etiquetas fantasma.
- * - Ninguno: cadena vacía (la línea no se dibuja).
- */
-function componerContacto(
-  doc: jsPDF,
-  telefono: string,
-  ref: string,
-  anchoUtil: number,
-): string {
-  if (!telefono && !ref) return ''
-  if (!telefono) return ref
-  if (!ref) return telefono
-
-  const completo = `${telefono} · ${ref}`
-  doc.setFont('helvetica', 'normal')
-  doc.setFontSize(7)
-  if (doc.getTextWidth(completo) <= anchoUtil) return completo
-  // No cabe completo: la Ref tiene prioridad absoluta.
-  return ref
 }
 
 /**
