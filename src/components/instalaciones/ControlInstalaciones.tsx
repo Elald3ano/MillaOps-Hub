@@ -160,6 +160,13 @@ export function ControlInstalaciones({
   const [tiposAbierto, setTiposAbierto] = useState(false)
   const panelTiposRef = useRef<HTMLDivElement>(null)
 
+  // Filtro de TIPO DE SERVICIO (multi-selección). Usa la clave normalizada
+  // (`limpiarTexto`) para no duplicar el mismo servicio por tildes o espacios.
+  const [serviciosSeleccionados, setServiciosSeleccionados] = useState<Set<string>>(new Set())
+  const [serviciosAbierto, setServiciosAbierto] = useState(false)
+  const [busquedaServicio, setBusquedaServicio] = useState('')
+  const panelServiciosRef = useRef<HTMLDivElement>(null)
+
   const tecnicoPorId = useMemo(() => new Map(tecnicos.map((t) => [t.id, t])), [tecnicos])
 
   /**
@@ -256,8 +263,32 @@ export function ControlInstalaciones({
     }
   }, [filas])
 
-  /** Conteo de tipos de novedad acotado a la ciudad activa (contador del desplegable). */
-  const conteoTiposCiudad = useMemo(() => {
+  /** Tipos de servicio únicos del corte (dentro de la ciudad activa). */
+  const serviciosDisponibles = useMemo(() => {
+    const porClave = new Map<string, { clave: string; etiqueta: string; cantidad: number }>()
+    for (const fila of filas) {
+      if (ciudadFiltro && fila.servicio.ciudad !== ciudadFiltro) continue
+      const etiqueta = fila.servicio.tipo_servicio?.trim()
+      if (!etiqueta) continue
+      const clave = limpiarTexto(etiqueta)
+      if (!clave) continue
+      const prev = porClave.get(clave)
+      if (prev) prev.cantidad += 1
+      else porClave.set(clave, { clave, etiqueta, cantidad: 1 })
+    }
+    return [...porClave.values()].sort(
+      (a, b) => b.cantidad - a.cantidad || a.etiqueta.localeCompare(b.etiqueta),
+    )
+  }, [filas, ciudadFiltro])
+
+  /** Lista del desplegable acotada por su buscador interno. */
+  const serviciosVisibles = useMemo(() => {
+    const q = limpiarTexto(busquedaServicio)
+    if (!q) return serviciosDisponibles
+    return serviciosDisponibles.filter((s) => s.clave.includes(q))
+  }, [serviciosDisponibles, busquedaServicio])
+
+  /** Conteo de tipos de novedad acotado a la ciudad activa (contador del desplegable). */  const conteoTiposCiudad = useMemo(() => {
     const porTipo = new Map<TipoNovedadInstalacion, number>()
     for (const fila of filas) {
       if (ciudadFiltro && fila.servicio.ciudad !== ciudadFiltro) continue
@@ -336,6 +367,13 @@ export function ControlInstalaciones({
           return false
         }
       }
+      // Filtro de TIPO DE SERVICIO (también ortogonal: se combina con todo).
+      if (
+        serviciosSeleccionados.size > 0 &&
+        !serviciosSeleccionados.has(limpiarTexto(fila.servicio.tipo_servicio))
+      ) {
+        return false
+      }
       return true
     })
 
@@ -384,6 +422,7 @@ export function ControlInstalaciones({
     rangoDias,
     barriosSeleccionados,
     tiposNovedadSeleccionados,
+    serviciosSeleccionados,
     orden,
   ])
 
@@ -503,6 +542,7 @@ export function ControlInstalaciones({
     setBarriosSeleccionados(new Set())
     setRangoDias('todas')
     setTiposNovedadSeleccionados(new Set())
+    setServiciosSeleccionados(new Set())
   }
 
   const toggleTipoNovedad = (tipo: TipoNovedadInstalacion) => {
@@ -514,9 +554,28 @@ export function ControlInstalaciones({
     })
   }
 
+  const toggleServicio = (clave: string) => {
+    setServiciosSeleccionados((prev) => {
+      const siguiente = new Set(prev)
+      if (siguiente.has(clave)) siguiente.delete(clave)
+      else siguiente.add(clave)
+      return siguiente
+    })
+  }
+
+  // "Marcar todos" opera sobre lo visible (respeta el buscador interno), para
+  // que un corte con muchos servicios se pueda acotar antes de marcarlos.
+  const marcarTodosServicios = () => {
+    setServiciosSeleccionados((prev) => {
+      const siguiente = new Set(prev)
+      for (const s of serviciosVisibles) siguiente.add(s.clave)
+      return siguiente
+    })
+  }
+
   // Cierra los desplegables al hacer clic fuera (o con Escape).
   useEffect(() => {
-    if (!barriosAbierto && !tiposAbierto) return
+    if (!barriosAbierto && !tiposAbierto && !serviciosAbierto) return
     const alClicFuera = (e: MouseEvent) => {
       const objetivo = e.target as Node
       if (barriosAbierto && panelBarriosRef.current && !panelBarriosRef.current.contains(objetivo)) {
@@ -525,11 +584,19 @@ export function ControlInstalaciones({
       if (tiposAbierto && panelTiposRef.current && !panelTiposRef.current.contains(objetivo)) {
         setTiposAbierto(false)
       }
+      if (
+        serviciosAbierto &&
+        panelServiciosRef.current &&
+        !panelServiciosRef.current.contains(objetivo)
+      ) {
+        setServiciosAbierto(false)
+      }
     }
     const alEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setBarriosAbierto(false)
         setTiposAbierto(false)
+        setServiciosAbierto(false)
       }
     }
     document.addEventListener('mousedown', alClicFuera)
@@ -538,7 +605,7 @@ export function ControlInstalaciones({
       document.removeEventListener('mousedown', alClicFuera)
       document.removeEventListener('keydown', alEscape)
     }
-  }, [barriosAbierto, tiposAbierto])
+  }, [barriosAbierto, tiposAbierto, serviciosAbierto])
 
   /** Exporta la planilla PDF respetando el orden y los filtros en pantalla. */
   const descargarPlanilla = useCallback(async () => {
@@ -588,6 +655,12 @@ export function ControlInstalaciones({
           .map((t) => t.etiqueta)
         partes.push(`Tipos de novedad: ${nombres.join(', ')}`)
       }
+      if (serviciosSeleccionados.size > 0) {
+        const nombres = serviciosDisponibles
+          .filter((s) => serviciosSeleccionados.has(s.clave))
+          .map((s) => s.etiqueta)
+        partes.push(`Servicios: ${nombres.join(', ')}`)
+      }
       if (orden) {
         partes.push(`Orden: ${orden.columna} (${orden.direccion === 'asc' ? 'asc' : 'desc'})`)
       }
@@ -618,6 +691,8 @@ export function ControlInstalaciones({
     tipoDestacado,
     busqueda,
     tiposNovedadSeleccionados,
+    serviciosSeleccionados,
+    serviciosDisponibles,
     orden,
     notificar,
   ])
@@ -625,7 +700,7 @@ export function ControlInstalaciones({
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
       {/* ---- Panel 4/12: balance y filtros ---- */}
-      <aside className="space-y-4 lg:col-span-4">
+      <aside className="space-y-4 lg:col-span-3">
         <section className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
           <header className="mb-3 flex items-center gap-2">
             <span className="flex size-8 items-center justify-center rounded-lg bg-slate-900">
@@ -779,7 +854,7 @@ export function ControlInstalaciones({
       </aside>
 
       {/* ---- Panel 8/12: tablero de seguimiento ---- */}
-      <section className="space-y-3 lg:col-span-8">
+      <section className="space-y-3 lg:col-span-9">
         <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
           <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -943,7 +1018,9 @@ export function ControlInstalaciones({
               ))}
             </select>
 
-            {(hayFiltroBarrioODias || tiposNovedadSeleccionados.size > 0) && (
+            {(hayFiltroBarrioODias ||
+              tiposNovedadSeleccionados.size > 0 ||
+              serviciosSeleccionados.size > 0) && (
               <button
                 type="button"
                 onClick={limpiarFiltrosCabecera}
@@ -1038,6 +1115,122 @@ export function ControlInstalaciones({
                       </button>
                     </div>
                   )}
+                </div>
+              )}
+            </div>
+
+            {/* Tipos de servicio (multi-selección) */}
+            <div className="relative" ref={panelServiciosRef}>
+              <button
+                type="button"
+                onClick={() => setServiciosAbierto((v) => !v)}
+                aria-expanded={serviciosAbierto}
+                aria-haspopup="listbox"
+                className={cn(
+                  'inline-flex max-w-[240px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium ring-1 transition',
+                  serviciosSeleccionados.size > 0
+                    ? 'bg-slate-900 text-white ring-slate-900'
+                    : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
+                )}
+              >
+                <PackageSearch className="size-3.5 shrink-0" />
+                <span className="truncate">
+                  {serviciosSeleccionados.size === 0
+                    ? 'Todos los servicios'
+                    : `Servicios: ${serviciosSeleccionados.size} seleccionado${
+                        serviciosSeleccionados.size === 1 ? '' : 's'
+                      }`}
+                </span>
+                <ChevronDown
+                  className={cn('size-3.5 shrink-0 transition', serviciosAbierto && 'rotate-180')}
+                />
+              </button>
+
+              {serviciosAbierto && (
+                <div
+                  role="listbox"
+                  aria-multiselectable="true"
+                  aria-label="Filtrar por tipo de servicio"
+                  className="absolute top-full left-0 z-30 mt-1 w-72 overflow-hidden rounded-xl bg-white shadow-xl ring-1 ring-slate-200"
+                >
+                  <div className="border-b border-slate-100 p-2">
+                    <label className="relative block">
+                      <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="search"
+                        autoFocus
+                        value={busquedaServicio}
+                        onChange={(e) => setBusquedaServicio(e.target.value)}
+                        placeholder="Buscar servicio…"
+                        className="w-full rounded-lg py-1 pr-2 pl-7 text-xs text-slate-900 ring-1 ring-slate-200 outline-none focus:ring-2 focus:ring-slate-900"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto p-1">
+                    {serviciosVisibles.length === 0 ? (
+                      <p className="px-2 py-3 text-center text-[11px] text-slate-400">
+                        Sin servicios que coincidan.
+                      </p>
+                    ) : (
+                      serviciosVisibles.map((s) => {
+                        const marcado = serviciosSeleccionados.has(s.clave)
+                        return (
+                          <button
+                            key={s.clave}
+                            type="button"
+                            role="option"
+                            aria-selected={marcado}
+                            onClick={() => toggleServicio(s.clave)}
+                            title={s.etiqueta}
+                            className={cn(
+                              'flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-xs transition',
+                              marcado
+                                ? 'bg-slate-100 font-semibold text-slate-900'
+                                : 'text-slate-600 hover:bg-slate-50',
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'flex size-3.5 shrink-0 items-center justify-center rounded ring-1',
+                                marcado
+                                  ? 'bg-slate-900 text-white ring-slate-900'
+                                  : 'bg-white ring-slate-300',
+                              )}
+                            >
+                              {marcado && <Check className="size-2.5" />}
+                            </span>
+                            <span className="flex-1 truncate">{s.etiqueta}</span>
+                            <span className="text-[10px] font-bold text-slate-400 tabular-nums">
+                              {s.cantidad}
+                            </span>
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-1 border-t border-slate-100 p-1.5">
+                    <button
+                      type="button"
+                      onClick={marcarTodosServicios}
+                      disabled={serviciosVisibles.length === 0}
+                      className="rounded-lg px-2 py-1 text-[11px] font-semibold text-slate-700 transition hover:bg-slate-100 disabled:opacity-40"
+                    >
+                      Marcar todos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setServiciosSeleccionados(new Set())
+                        setBusquedaServicio('')
+                      }}
+                      disabled={serviciosSeleccionados.size === 0}
+                      className="rounded-lg px-2 py-1 text-[11px] font-medium text-slate-500 transition hover:bg-slate-100 disabled:opacity-40"
+                    >
+                      Limpiar
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1340,7 +1533,7 @@ function EncabezadoOrdenable({
   )
 }
 
-/** Tarjeta compacta de métrica del panel de balance. */
+/** Tarjeta compacta de métrica del panel de balance (ancho 3/12). */
 function Metrica({
   etiqueta,
   valor,
@@ -1351,9 +1544,19 @@ function Metrica({
   clase: string
 }) {
   return (
-    <div className="rounded-lg bg-slate-50 px-2 py-1.5 ring-1 ring-slate-200">
-      <p className={cn('text-lg leading-tight font-bold tabular-nums', clase)}>{valor}</p>
-      <p className="text-[10px] font-medium text-slate-500">{etiqueta}</p>
+    <div className="min-w-0 rounded-lg bg-slate-50 px-1.5 py-1 ring-1 ring-slate-200">
+      <p
+        className={cn(
+          'truncate text-base leading-tight font-bold tabular-nums',
+          clase,
+        )}
+        title={String(valor)}
+      >
+        {valor}
+      </p>
+      <p className="truncate text-[9px] leading-tight font-medium text-slate-500" title={etiqueta}>
+        {etiqueta}
+      </p>
     </div>
   )
 }
