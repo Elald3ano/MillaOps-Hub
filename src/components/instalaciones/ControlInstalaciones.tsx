@@ -15,6 +15,7 @@ import {
   PencilLine,
   RefreshCw,
   Search,
+  Tag,
   X,
 } from 'lucide-react'
 import type {
@@ -150,6 +151,15 @@ export function ControlInstalaciones({
   const [generandoPdf, setGenerandoPdf] = useState(false)
   const panelBarriosRef = useRef<HTMLDivElement>(null)
 
+  // Filtro de TIPO de novedad (multi-selección). Es ortogonal al resto: se
+  // combina con barrio/días, con el estado del panel izquierdo y con el
+  // buscador, porque "qué tipo de bloqueo" no es "qué estado de gestión".
+  const [tiposNovedadSeleccionados, setTiposNovedadSeleccionados] = useState<
+    Set<TipoNovedadInstalacion>
+  >(new Set())
+  const [tiposAbierto, setTiposAbierto] = useState(false)
+  const panelTiposRef = useRef<HTMLDivElement>(null)
+
   const tecnicoPorId = useMemo(() => new Map(tecnicos.map((t) => [t.id, t])), [tecnicos])
 
   /**
@@ -246,6 +256,18 @@ export function ControlInstalaciones({
     }
   }, [filas])
 
+  /** Conteo de tipos de novedad acotado a la ciudad activa (contador del desplegable). */
+  const conteoTiposCiudad = useMemo(() => {
+    const porTipo = new Map<TipoNovedadInstalacion, number>()
+    for (const fila of filas) {
+      if (ciudadFiltro && fila.servicio.ciudad !== ciudadFiltro) continue
+      if (!fila.novedad) continue
+      const tipo = fila.novedad.tipo_novedad
+      porTipo.set(tipo, (porTipo.get(tipo) ?? 0) + 1)
+    }
+    return porTipo
+  }, [filas, ciudadFiltro])
+
   /** Barrios disponibles de la ciudad activa (universo, no el ya filtrado). */
   const barriosDisponibles = useMemo(() => {
     const porClave = new Map<string, string>()
@@ -306,6 +328,14 @@ export function ControlInstalaciones({
       }
 
       if (texto && !fila.indiceBusqueda.includes(texto)) return false
+
+      // Filtro de TIPO de novedad: se aplica al final y por encima de todo lo
+      // demás (es ortogonal a barrio/días y al estado de gestión).
+      if (tiposNovedadSeleccionados.size > 0) {
+        if (!fila.novedad || !tiposNovedadSeleccionados.has(fila.novedad.tipo_novedad)) {
+          return false
+        }
+      }
       return true
     })
 
@@ -353,6 +383,7 @@ export function ControlInstalaciones({
     hayFiltroBarrioODias,
     rangoDias,
     barriosSeleccionados,
+    tiposNovedadSeleccionados,
     orden,
   ])
 
@@ -471,18 +502,35 @@ export function ControlInstalaciones({
   const limpiarFiltrosCabecera = () => {
     setBarriosSeleccionados(new Set())
     setRangoDias('todas')
+    setTiposNovedadSeleccionados(new Set())
   }
 
-  // Cierra el desplegable de barrios al hacer clic fuera (o con Escape).
+  const toggleTipoNovedad = (tipo: TipoNovedadInstalacion) => {
+    setTiposNovedadSeleccionados((prev) => {
+      const siguiente = new Set(prev)
+      if (siguiente.has(tipo)) siguiente.delete(tipo)
+      else siguiente.add(tipo)
+      return siguiente
+    })
+  }
+
+  // Cierra los desplegables al hacer clic fuera (o con Escape).
   useEffect(() => {
-    if (!barriosAbierto) return
+    if (!barriosAbierto && !tiposAbierto) return
     const alClicFuera = (e: MouseEvent) => {
-      if (panelBarriosRef.current && !panelBarriosRef.current.contains(e.target as Node)) {
+      const objetivo = e.target as Node
+      if (barriosAbierto && panelBarriosRef.current && !panelBarriosRef.current.contains(objetivo)) {
         setBarriosAbierto(false)
+      }
+      if (tiposAbierto && panelTiposRef.current && !panelTiposRef.current.contains(objetivo)) {
+        setTiposAbierto(false)
       }
     }
     const alEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setBarriosAbierto(false)
+      if (e.key === 'Escape') {
+        setBarriosAbierto(false)
+        setTiposAbierto(false)
+      }
     }
     document.addEventListener('mousedown', alClicFuera)
     document.addEventListener('keydown', alEscape)
@@ -490,7 +538,7 @@ export function ControlInstalaciones({
       document.removeEventListener('mousedown', alClicFuera)
       document.removeEventListener('keydown', alEscape)
     }
-  }, [barriosAbierto])
+  }, [barriosAbierto, tiposAbierto])
 
   /** Exporta la planilla PDF respetando el orden y los filtros en pantalla. */
   const descargarPlanilla = useCallback(async () => {
@@ -533,6 +581,13 @@ export function ControlInstalaciones({
         if (filtro === 'listas') partes.push('Sin novedad')
       }
       if (busqueda.trim()) partes.push(`Búsqueda: "${busqueda.trim()}"`)
+      if (tiposNovedadSeleccionados.size > 0) {
+        // Se listan todos los tipos marcados, no solo el conteo: la planilla
+        // debe documentar exactamente qué se exportó.
+        const nombres = TIPOS_NOVEDAD_UI.filter((t) => tiposNovedadSeleccionados.has(t.tipo))
+          .map((t) => t.etiqueta)
+        partes.push(`Tipos de novedad: ${nombres.join(', ')}`)
+      }
       if (orden) {
         partes.push(`Orden: ${orden.columna} (${orden.direccion === 'asc' ? 'asc' : 'desc'})`)
       }
@@ -562,6 +617,7 @@ export function ControlInstalaciones({
     filtro,
     tipoDestacado,
     busqueda,
+    tiposNovedadSeleccionados,
     orden,
     notificar,
   ])
@@ -887,7 +943,7 @@ export function ControlInstalaciones({
               ))}
             </select>
 
-            {hayFiltroBarrioODias && (
+            {(hayFiltroBarrioODias || tiposNovedadSeleccionados.size > 0) && (
               <button
                 type="button"
                 onClick={limpiarFiltrosCabecera}
@@ -897,6 +953,94 @@ export function ControlInstalaciones({
               </button>
             )}
 
+            {/* Tipos de novedad (multi-selección) */}
+            <div className="relative" ref={panelTiposRef}>
+              <button
+                type="button"
+                onClick={() => setTiposAbierto((v) => !v)}
+                aria-expanded={tiposAbierto}
+                aria-haspopup="listbox"
+                className={cn(
+                  'inline-flex max-w-[240px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium ring-1 transition',
+                  tiposNovedadSeleccionados.size > 0
+                    ? 'bg-slate-900 text-white ring-slate-900'
+                    : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50',
+                )}
+              >
+                <Tag className="size-3.5 shrink-0" />
+                <span className="truncate">
+                  {tiposNovedadSeleccionados.size === 0
+                    ? 'Todas las novedades'
+                    : `Novedades: ${tiposNovedadSeleccionados.size} seleccionada${
+                        tiposNovedadSeleccionados.size === 1 ? '' : 's'
+                      }`}
+                </span>
+                <ChevronDown
+                  className={cn('size-3.5 shrink-0 transition', tiposAbierto && 'rotate-180')}
+                />
+              </button>
+
+              {tiposAbierto && (
+                <div
+                  role="listbox"
+                  aria-multiselectable="true"
+                  aria-label="Filtrar por tipo de novedad"
+                  className="absolute top-full left-0 z-30 mt-1 w-64 overflow-hidden rounded-xl bg-white shadow-xl ring-1 ring-slate-200"
+                >
+                  <div className="p-1">
+                    {TIPOS_NOVEDAD_UI.map((tipo) => {
+                      const marcado = tiposNovedadSeleccionados.has(tipo.tipo)
+                      // Conteo disponible del tipo dentro de la ciudad activa.
+                      const cantidad = conteoTiposCiudad.get(tipo.tipo) ?? 0
+                      return (
+                        <button
+                          key={tipo.tipo}
+                          type="button"
+                          role="option"
+                          aria-selected={marcado}
+                          onClick={() => toggleTipoNovedad(tipo.tipo)}
+                          title={tipo.descripcion}
+                          className={cn(
+                            'flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-xs transition',
+                            marcado
+                              ? 'bg-slate-100 font-semibold text-slate-900'
+                              : 'text-slate-600 hover:bg-slate-50',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'flex size-3.5 shrink-0 items-center justify-center rounded ring-1',
+                              marcado
+                                ? 'bg-slate-900 text-white ring-slate-900'
+                                : 'bg-white ring-slate-300',
+                            )}
+                          >
+                            {marcado && <Check className="size-2.5" />}
+                          </span>
+                          <span aria-hidden="true">{tipo.icono}</span>
+                          <span className="flex-1 truncate">{tipo.etiqueta}</span>
+                          <span className="text-[10px] font-bold text-slate-400 tabular-nums">
+                            {cantidad}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {tiposNovedadSeleccionados.size > 0 && (
+                    <div className="border-t border-slate-100 p-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setTiposNovedadSeleccionados(new Set())}
+                        className="w-full rounded-lg px-2 py-1 text-left text-[11px] font-medium text-slate-500 transition hover:bg-slate-50"
+                      >
+                        Limpiar filtro
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => void descargarPlanilla()}
@@ -956,7 +1100,7 @@ export function ControlInstalaciones({
           ) : (
             <div className="overflow-hidden rounded-xl ring-1 ring-slate-200">
               <div className="max-h-[640px] overflow-auto">
-                <table className="w-full min-w-[1060px] text-left text-xs">
+                <table className="w-full min-w-[1180px] text-left text-xs">
                   <thead className="sticky top-0 z-10 bg-slate-900 text-[10px] tracking-wide text-slate-400 uppercase">
                     <tr>
                       <EncabezadoOrdenable
@@ -1003,7 +1147,7 @@ export function ControlInstalaciones({
                         icono={<IconoOrden columna="novedad" orden={orden} />}
                         activa={orden?.columna === 'novedad'}
                       />
-                      <th className="px-3 py-2 font-semibold">Acciones</th>
+                      <th className="w-44 min-w-[165px] px-3 py-2 font-semibold">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 bg-white">
@@ -1095,15 +1239,15 @@ export function ControlInstalaciones({
                               </span>
                             )}
                           </td>
-                          <td className="px-3 py-2">
+                          <td className="w-44 min-w-[165px] px-3 py-2">
                             <div className="flex flex-col gap-1">
                               <button
                                 type="button"
                                 onClick={() => setOrdenEnEdicion(servicio.numero_orden)}
-                                className="inline-flex items-center gap-1 rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-semibold whitespace-nowrap text-white transition hover:bg-slate-800"
+                                className="inline-flex items-center justify-center gap-1 rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-semibold whitespace-nowrap text-white transition hover:bg-slate-800"
                               >
-                                <PencilLine className="size-3" />
-                                {novedad ? 'Editar' : '📝 Gestionar Novedad'}
+                                <PencilLine className="size-3 shrink-0" />
+                                {novedad ? 'Editar' : 'Gestionar Novedad'}
                               </button>
                               <button
                                 type="button"
@@ -1114,12 +1258,12 @@ export function ControlInstalaciones({
                                     ? `WhatsApp a ${dueno.operador.nombre}`
                                     : 'Copiar mensaje para el operador'
                                 }
-                                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2 py-1 text-[11px] font-semibold whitespace-nowrap text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+                                className="inline-flex items-center justify-center gap-1 rounded-lg bg-emerald-600 px-2 py-1 text-[11px] font-semibold whitespace-nowrap text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
                               >
                                 {dueno.operador?.telefono ? (
-                                  <MessageCircle className="size-3" />
+                                  <MessageCircle className="size-3 shrink-0" />
                                 ) : (
-                                  <Copy className="size-3" />
+                                  <Copy className="size-3 shrink-0" />
                                 )}
                                 WhatsApp
                               </button>
