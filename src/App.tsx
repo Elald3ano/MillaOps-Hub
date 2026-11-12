@@ -1,10 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BarChart3, Boxes, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, TrendingUp, WifiOff } from 'lucide-react'
+import { BarChart3, Boxes, ClipboardCheck, CodeXml, Database, FileText, Layers, Map as MapIcon, RefreshCw, ShieldCheck, ShieldAlert, TrendingUp, WifiOff } from 'lucide-react'
 import { format } from 'date-fns'
 import { es } from 'date-fns/locale'
 import { DetalleTecnicoTerritorio } from './components/territorio/DetalleTecnicoTerritorio'
 import { GestionTerritorial } from './components/territorio/GestionTerritorial'
 import { AnaliticaDashboard } from './components/analitica/AnaliticaDashboard'
+import { CierresTecnicos } from './components/analitica/CierresTecnicos'
 import { AuditoriaCierresDashboard } from './components/cierres/AuditoriaCierresDashboard'
 import { ToastContainer, type Toast, type ToastVariant } from './components/ToastContainer'
 import { PdfExportModal } from './components/PdfExportModal'
@@ -17,24 +18,26 @@ import {
   getReglas,
   getServiciosActivos,
   getTecnicos,
-  getUltimaAuditoriaCierres,
-  guardarNovedadInstalacion,
+  getUltimaAuditoriaCierres,  guardarNovedadInstalacion,
   obtenerCategoriasServicios,
+  obtenerCierresRecientes,
   obtenerInstalacionesActivas,
   obtenerNovedadesInstalaciones,
+  obtenerTiposCierresTecnicos,
   obtenerTiposInstalaciones,
   obtenerTiposNoDespachables,
   reasignarServiciosActivos,
+  reemplazarCierresRecientes,
   reemplazarInstalacionesActivas,
   reemplazarServiciosActivos,
 } from './services/supabaseService'
-import type { CategoriaConServicios, EntradaNovedadInstalacion, NovedadInstalacion, ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
+import type { CategoriaConServicios, CierreTecnico, EntradaNovedadInstalacion, NovedadInstalacion, ReglaConTecnico, Servicio, ServicioNuevo, Tecnico } from './types'
 import type { ResultadoCierres } from './services/reconciliationService'
 import { cn } from './lib/utils'
 import { limpiarTexto } from './lib/normalizer'
 
 type EstadoConexion = 'conectando' | 'conectado' | 'error'
-type VistaPrincipal = 'centro_mando' | 'instalaciones' | 'territorio' | 'cierres'
+type VistaPrincipal = 'centro_mando' | 'instalaciones' | 'cierres_tecnicos' | 'territorio' | 'cierres'
 
 // El Control de Instalaciones se carga solo al abrir su pestaña, para no
 // inflar el bundle inicial (el resto de la app no depende de este módulo).
@@ -53,6 +56,9 @@ function App() {
   const [serviciosActivos, setServiciosActivos] = useState<Servicio[]>([])
   // Órdenes cerradas del último reporte: solo en memoria, para auditoría.
   const [serviciosCerrados, setServiciosCerrados] = useState<ServicioNuevo[]>([])
+  // Cierres técnicos de la última semana (persistidos con ventana deslizante).
+  const [cierresRecientes, setCierresRecientes] = useState<CierreTecnico[]>([])
+  const [tiposCierres, setTiposCierres] = useState<Set<string>>(new Set())
   // Categorización de intake (fail-open): categorías + tipos excluidos del despacho.
   const [categorias, setCategorias] = useState<CategoriaConServicios[]>([])
   const [tiposNoDespachables, setTiposNoDespachables] = useState<Set<string>>(new Set())
@@ -119,6 +125,8 @@ function App() {
           tiposInstalacionesData,
           novedadesData,
           instalacionesData,
+          tiposCierresData,
+          cierresData,
         ] = await Promise.all([
           getTecnicos(),
           getReglas(),
@@ -132,6 +140,10 @@ function App() {
           obtenerNovedadesInstalaciones(),
           // Persistencia cíclica: recupera las instalaciones tras un F5.
           obtenerInstalacionesActivas(),
+          // Claves de "Servicios Técnicos" para la ventana de cierres.
+          obtenerTiposCierresTecnicos().catch(() => null),
+          // Cierres de la última semana (degrada a [] si falta la tabla).
+          obtenerCierresRecientes(),
         ])
 
         setTecnicos(tecnicosData)
@@ -141,7 +153,9 @@ function App() {
         setCategorias(categoriasData ?? [])
         setTiposNoDespachables(noDespachables ?? new Set<string>())
         setTiposInstalaciones(tiposInstalacionesData ?? new Set<string>())
+        setTiposCierres(tiposCierresData ?? new Set<string>())
         setNovedadesInstalaciones(novedadesData)
+        setCierresRecientes(cierresData)
         // Hidratación tras un F5: solo si el tablero aún no tiene un reporte
         // de esta sesión (un Excel recién subido es más reciente).
         setServiciosInstalaciones((prev) => (prev.length > 0 ? prev : instalacionesData))
@@ -304,10 +318,14 @@ function App() {
         //    Las órdenes de "Instalaciones y Traslados" se desvían al módulo de
         //    instalaciones y NO se persisten en `servicios` (protege la cuota).
         const { parseServiciosSigma } = await import('./services/excelParser')
-        const { abiertos, cerrados, instalaciones } = await parseServiciosSigma(file, {
-          ciudadFiltro,
-          tiposInstalaciones,
-        })
+        const { abiertos, cerrados, instalaciones, cierresRecientes } = await parseServiciosSigma(
+          file,
+          {
+            ciudadFiltro,
+            tiposInstalaciones,
+            tiposCierres,
+          },
+        )
 
         // Se reemplaza el universo de instalaciones con el del reporte vigente.
         setServiciosInstalaciones(instalaciones)
@@ -327,6 +345,22 @@ function App() {
             )
           })
 
+        // Cierres de la última semana: se persisten junto con el reporte.
+        // Es un reemplazo total del paquete de 7 días (ventana deslizante).
+        setCierresRecientes(cierresRecientes)
+        void reemplazarCierresRecientes(cierresRecientes)
+          .then((n) => {
+            console.log(`[Cierres] Persistidos ${n} cierres de la última semana.`)
+          })
+          .catch((error: unknown) => {
+            notificar(
+              error instanceof Error
+                ? `Cierres guardados solo en pantalla: ${error.message}`
+                : 'Cierres guardados solo en pantalla (fallo de Supabase).',
+              'error',
+            )
+          })
+
         if (abiertos.length === 0 && cerrados.length === 0) {
           notificar(
             instalaciones.length > 0
@@ -339,11 +373,11 @@ function App() {
           return instalaciones.length > 0
         }
 
-        // Solo hay cerradas: se conservan para auditoría sin tocar Supabase.
+        // Solo hay cerradas: se conservan para auditoría sin tocar el despacho.
         if (abiertos.length === 0) {
           setServiciosCerrados(cerrados)
           notificar(
-            `El archivo solo contiene órdenes cerradas: ${cerrados.length} registradas para auditoría.`,
+            `El archivo solo contiene órdenes cerradas: ${cerrados.length} registradas · ${cierresRecientes.length} en la última semana.`,
             'info',
           )
           return true
@@ -398,7 +432,7 @@ function App() {
         setProcesando(false)
       }
     },
-    [reglas, cargarDatos, notificar, tiposNoDespachables, tiposInstalaciones],
+    [reglas, cargarDatos, notificar, tiposNoDespachables, tiposInstalaciones, tiposCierres],
   )
 
   // Guarda (upsert) una novedad de instalación y actualiza el mapa en memoria.
@@ -563,6 +597,7 @@ function App() {
                 [
                   { id: 'centro_mando', label: 'Centro de Mando', icon: BarChart3 },
                   { id: 'instalaciones', label: 'Control de Instalaciones', icon: Boxes },
+                  { id: 'cierres_tecnicos', label: 'Cierres Técnicos', icon: ClipboardCheck },
                   { id: 'territorio', label: 'Gestión Territorial', icon: MapIcon },
                   { id: 'cierres', label: 'Auditoría de Cierres', icon: TrendingUp },
                 ] as const
@@ -618,6 +653,13 @@ function App() {
                   notificar={notificar}
                 />
               </Suspense>
+            ) : vistaActiva === 'cierres_tecnicos' ? (
+              <CierresTecnicos
+                cierres={cierresRecientes}
+                reglas={reglas}
+                tecnicos={tecnicos}
+                notificar={notificar}
+              />
             ) : vistaActiva === 'cierres' ? (
               <AuditoriaCierresDashboard
                 serviciosActivos={serviciosActivos}

@@ -1,6 +1,6 @@
 import { differenceInCalendarDays } from 'date-fns'
 import * as XLSX from 'xlsx'
-import type { FilaMatrizImport, ServicioNuevo } from '../types'
+import type { CierreTecnico, FilaMatrizImport, ServicioNuevo } from '../types'
 import { limpiarTexto } from '../lib/normalizer'
 import { esSucursalAutorizada } from '../lib/zonasPermitidas'
 
@@ -332,6 +332,72 @@ export interface ParseoSigma {
    * Control de Instalaciones en memoria.
    */
   instalaciones: ServicioNuevo[]
+  /**
+   * Cierres de la última semana (ventana deslizante sobre `fecha_cierre`).
+   * Solo incluye órdenes de la categoría "Servicios Técnicos" con estado
+   * cerrado y fecha dentro de los 7 días previos al cierre más reciente del
+   * archivo. Es el conjunto que alimenta `servicios_cierres`.
+   */
+  cierresRecientes: CierreTecnico[]
+}
+
+/** Días de la ventana deslizante de cierres. */
+export const DIAS_VENTANA_CIERRES = 7
+
+/**
+ * Fecha local en `YYYY-MM-DD` — la clave de día que usa toda la ventana.
+ *
+ * Se leen los componentes LOCALES porque `parsearFecha` construye las fechas a
+ * medianoche local (`new Date(anio, mes-1, dia)`). Por eso una fecha del 3 de
+ * noviembre NO se guarda como `2026-11-03T00:00:00Z`, sino como
+ * `2026-11-03T05:00:00Z` (Bogotá = UTC−5). Leerla con `getUTC*` daría el 3,
+ * pero cualquier fecha con hora real de la tarde (p. ej. `...T23:00:00Z`)
+ * saltaría al día siguiente. Con `get*` local, el día que el usuario ve en
+ * Sigma es exactamente el resultado.
+ */
+export function claveDia(fecha: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${fecha.getFullYear()}-${pad(fecha.getMonth() + 1)}-${pad(fecha.getDate())}`
+}
+
+/**
+ * Recorta un lote de cierres a la ventana deslizante de `DIAS_VENTANA_CIERRES`.
+ *
+ * La referencia es la fecha de cierre MÁS RECIENTE del propio archivo, no la
+ * de hoy: si Daniel sube un reporte de hace cinco días, la semana se cuenta
+ * desde ese corte y no se pierde todo por "estar vencido".
+ *
+ * La comparación es por DÍA CALENDARIO, no por horas exactas: una orden
+ * cerrada a las 10:00 del día límite cuenta como "hace 7 días" aunque el
+ * cierre más reciente sea a las 15:30. Comparar por timestamp dejaba fuera
+ * las primeras horas del séptimo día.
+ *
+ * Las órdenes sin fecha de cierre se descartan: sin fecha no hay ventana.
+ */
+export function filtrarVentanaCierres<T extends { fecha_cierre?: string }>(
+  cerrados: T[],
+): T[] {
+  if (cerrados.length === 0) return []
+
+  // Se trabaja con claves de día (`YYYY-MM-DD`) para evitar desfases de zona.
+  const dias = cerrados
+    .map((cierre) => (cierre.fecha_cierre ? claveDia(new Date(cierre.fecha_cierre)) : ''))
+    .filter(Boolean)
+    .sort()
+  if (dias.length === 0) return []
+
+  const diaMaximo = dias[dias.length - 1]!
+  const [anio, mes, dia] = diaMaximo.split('-').map(Number)
+  const desde = new Date(anio!, mes! - 1, dia!)
+  desde.setDate(desde.getDate() - DIAS_VENTANA_CIERRES)
+  const diaLimite = claveDia(desde)
+
+  // Comparación lexicográfica de `YYYY-MM-DD` == comparación cronológica.
+  return cerrados.filter((cierre) => {
+    if (!cierre.fecha_cierre) return false
+    const clave = claveDia(new Date(cierre.fecha_cierre))
+    return clave >= diaLimite && clave <= diaMaximo
+  })
 }
 
 /** Opciones de parseo; `tiposInstalaciones` desvía esas órdenes al módulo de instalaciones. */
@@ -342,6 +408,13 @@ export interface OpcionesParseoSigma {
    * "Instalaciones y Traslados". Si no se pasa, el ruteo queda inactivo.
    */
   tiposInstalaciones?: ReadonlySet<string>
+  /**
+   * Claves normalizadas de la categoría "Servicios Técnicos". Si se pasa, las
+   * órdenes cerradas de esos tipos se recortan a la ventana de 7 días y se
+   * devuelven en `cierresRecientes`. Si no se pasa, se aplica la ventana a
+   * TODOS los cierres (fail-open: no se pierde ninguno por clasificación).
+   */
+  tiposCierres?: ReadonlySet<string>
 }
 
 /**
@@ -359,7 +432,7 @@ export async function parseServiciosSigma(
   opciones: OpcionesParseoSigma | string = {},
 ): Promise<ParseoSigma> {
   // Retrocompatible: el segundo argumento era la ciudad como string.
-  const { ciudadFiltro, tiposInstalaciones } =
+  const { ciudadFiltro, tiposInstalaciones, tiposCierres } =
     typeof opciones === 'string' ? { ciudadFiltro: opciones } : opciones
 
   const { servicios, descartadas } = await parseServiciosInterno(file, ciudadFiltro)
@@ -387,11 +460,27 @@ export async function parseServiciosSigma(
     }
   }
 
+  // ---- Ventana deslizante de cierres (última semana) ----
+  // Solo "Servicios Técnicos" si se conoce la categoría; si no, todos los
+  // cierres (fail-open: nunca se descarta una ejecución por falta de mapeo).
+  const candidatos =
+    tiposCierres && tiposCierres.size > 0
+      ? cerrados.filter((s) => tiposCierres.has(limpiarTexto(s.tipo_servicio)))
+      : cerrados
+
+  const enVentana = filtrarVentanaCierres(candidatos)
+
+  const cierresRecientes: CierreTecnico[] = enVentana.map((servicio) => ({
+    ...servicio,
+    fecha_cierre: claveDia(new Date(servicio.fecha_cierre ?? new Date())),
+    tecnico_cierre: servicio.tecnico_sigma?.trim() || undefined,
+  }))
+
   console.log(
-    `[Parser] Órdenes leídas de tu zona: ${servicios.length} | Descartadas de otras zonas: ${descartadas} | Abiertas: ${abiertos.length} | Cerradas: ${cerrados.length} | Instalaciones: ${instalaciones.length}`,
+    `[Parser] Órdenes leídas de tu zona: ${servicios.length} | Descartadas de otras zonas: ${descartadas} | Abiertas: ${abiertos.length} | Cerradas: ${cerrados.length} | Instalaciones: ${instalaciones.length} | Cierres última semana: ${cierresRecientes.length}`,
   )
 
-  return { abiertos, cerrados, instalaciones }
+  return { abiertos, cerrados, instalaciones, cierresRecientes }
 }
 
 /**
@@ -400,6 +489,7 @@ export async function parseServiciosSigma(
  *
  * Retrocompatible: concatena abiertos + cerrados + instalaciones para los
  * llamadores que necesitan el universo completo (p. ej. la auditoría de cierres).
+ * La ventana de 7 días vive en `cierresRecientes`, NO recorta este resultado.
  */
 export async function parseServiciosExcel(
   file: File,

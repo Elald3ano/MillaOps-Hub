@@ -153,3 +153,23 @@ export interface EtiquetaNovedad {
   descripcion: string
 }
 
+// ---- Cierres técnicos (última semana) ----
+
+/**
+ * Orden cerrada en Sigma dentro de la ventana de 7 días.
+ *
+ * Extiende `ServicioNuevo` añadiendo los dos campos informativos del reporte
+ * que NO viven en la tabla `servicios`: la fecha de cierre (aquí es
+ * obligatoria) y el técnico que ejecutó el cierre.
+ */
+export interface CierreTecnico extends ServicioNuevo {
+  /** Fecha de cierre (`YYYY-MM-DD`), ya recortada al día. */
+  fecha_cierre: string
+  /** Técnico que cerró en Sigma; `undefined` si el reporte no lo trae. */
+  tecnico_cierre?: string
+}
+
+/** Origen de un cierre según quién lo ejecutó. */
+export type OrigenCierre = 'titular' | 'externo' | 'sin_dueno'
+
+

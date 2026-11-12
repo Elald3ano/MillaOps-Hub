@@ -6,6 +6,7 @@ import type { Database } from '../types/database'
 import type {
   CategoriaConServicios,
   CategoriaServicio,
+  CierreTecnico,
   ConfigCuadrilla,
   EntradaNovedadInstalacion,
   EstadoGestionNovedad,
@@ -35,6 +36,8 @@ type NovedadInstalacionInsert =
   Database['public']['Tables']['novedades_instalaciones']['Insert']
 type InstalacionRow = Database['public']['Tables']['servicios_instalaciones']['Row']
 type InstalacionInsert = Database['public']['Tables']['servicios_instalaciones']['Insert']
+type CierreRow = Database['public']['Tables']['servicios_cierres']['Row']
+type CierreInsert = Database['public']['Tables']['servicios_cierres']['Insert']
 
 // Supabase limita el payload de una inserción; se particiona en lotes de 500.
 const TAMANO_LOTE_INSERCION = 500
@@ -1178,6 +1181,30 @@ export async function eliminarNovedadInstalacion(ordenId: string): Promise<void>
 /** Nombre canónico de la categoría que se enruta al Control de Instalaciones. */
 export const CATEGORIA_INSTALACIONES = 'Instalaciones y Traslados'
 
+/** Nombre canónico de la categoría de la que se auditan los cierres. */
+export const CATEGORIA_SERVICIOS_TECNICOS = 'Servicios Técnicos'
+
+/**
+ * Claves normalizadas de la categoría "Servicios Técnicos".
+ *
+ * Devuelve un set vacío si la categoría no existe (migración pendiente): el
+ * parser lo interpreta como "sin filtro" y trabaja sobre TODOS los cierres,
+ * lo que evita perder ejecuciones por un problema de clasificación.
+ */
+export async function obtenerTiposCierresTecnicos(): Promise<Set<string>> {
+  const categorias = await obtenerCategoriasServicios()
+  const objetivo = limpiarTexto(CATEGORIA_SERVICIOS_TECNICOS)
+  const categoria = categorias.find((c) => limpiarTexto(c.nombre) === objetivo)
+
+  const claves = new Set<string>()
+  if (!categoria) return claves
+  for (const mapeo of categoria.tipos_servicio) {
+    const clave = limpiarTexto(mapeo.tipo_solicitud)
+    if (clave) claves.add(clave)
+  }
+  return claves
+}
+
 /**
  * Tipos de servicio (`limpiarTexto(tipo_solicitud)`) que pertenecen a la
  * categoría "Instalaciones y Traslados". El intake los desvía al módulo de
@@ -1287,6 +1314,93 @@ export async function reemplazarInstalacionesActivas(
   for (const chunk of chunkArray(filas, TAMANO_LOTE_INSTALACIONES)) {
     const { error } = await supabase.from('servicios_instalaciones').insert(chunk)
     if (error) throw new Error(`Error al insertar instalaciones: ${error.message}`)
+    insertadas += chunk.length
+  }
+
+  return insertadas
+}
+
+// ---- Cierres técnicos (ventana deslizante de 7 días) ----
+
+const TAMANO_LOTE_CIERRES = 100
+
+function mapCierre(row: CierreRow): CierreTecnico {
+  return {
+    numero_orden: row.orden_id,
+    ciudad: row.ciudad,
+    barrio: row.barrio ?? '',
+    direccion: row.direccion ?? undefined,
+    tipo_servicio: row.tipo_servicio ?? '',
+    nombre_cliente: row.cliente_nombre ?? undefined,
+    telefono_cliente: row.telefono ?? undefined,
+    dias_antiguedad: row.dias_abierta ?? 0,
+    // La tabla no guarda la fecha de apertura: se usa la de cierre, que es el
+    // eje de tiempo de este módulo.
+    fecha_creacion: row.fecha_cierre,
+    tecnico_id: null,
+    estado: 'CERRADO',
+    fecha_cierre: row.fecha_cierre.slice(0, 10),
+    tecnico_cierre: row.tecnico_cierre ?? undefined,
+  }
+}
+
+/**
+ * Carga los cierres de la última ventana (7 días) persistidos en Supabase.
+ *
+ * Tolerante a fallos: si la migración aún no se ejecutó devuelve `[]` y avisa
+ * por consola, igual que el resto de tablas opcionales del Hub.
+ */
+export async function obtenerCierresRecientes(): Promise<CierreTecnico[]> {
+  const resultado = await leerTodasLasFilas<CierreRow>((desde, hasta) =>
+    supabase
+      .from('servicios_cierres')
+      .select('*')
+      .order('fecha_cierre', { ascending: false })
+      .range(desde, hasta),
+  )
+
+  if (resultado.error) {
+    console.warn('[obtenerCierresRecientes] Cierres no disponibles:', resultado.error.message)
+    return []
+  }
+
+  return resultado.data.map(mapCierre)
+}
+
+/**
+ * Reemplazo total del paquete de cierres (mismo patrón que las instalaciones):
+ * borra el lote anterior e inserta el nuevo en lotes de 100.
+ *
+ * El recorte a 7 días ocurre en el parser; aquí se persiste tal cual para que
+ * la pantalla y la base reflejen exactamente la misma ventana.
+ */
+export async function reemplazarCierresRecientes(cierres: CierreTecnico[]): Promise<number> {
+  const { error: delError } = await supabase
+    .from('servicios_cierres')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (delError) throw new Error(`Error al limpiar los cierres anteriores: ${delError.message}`)
+
+  if (cierres.length === 0) return 0
+
+  const filas: CierreInsert[] = cierres.map((cierre) => ({
+    orden_id: cierre.numero_orden,
+    ciudad: cierre.ciudad,
+    barrio: cierre.barrio || null,
+    direccion: cierre.direccion ?? null,
+    cliente_nombre: cierre.nombre_cliente ?? null,
+    telefono: cierre.telefono_cliente ?? null,
+    tipo_servicio: cierre.tipo_servicio || null,
+    dias_abierta: cierre.dias_antiguedad,
+    fecha_cierre: cierre.fecha_cierre.slice(0, 10),
+    tecnico_cierre: cierre.tecnico_cierre ?? null,
+  }))
+
+  let insertadas = 0
+  for (const chunk of chunkArray(filas, TAMANO_LOTE_CIERRES)) {
+    const { error } = await supabase.from('servicios_cierres').insert(chunk)
+    if (error) throw new Error(`Error al insertar cierres: ${error.message}`)
     insertadas += chunk.length
   }
 
