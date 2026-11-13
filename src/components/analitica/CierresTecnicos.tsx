@@ -42,8 +42,17 @@ interface CierresTecnicosProps {
   notificar: (mensaje: string, variant?: ToastVariant) => void
 }
 
+/** Foco activo del árbol izquierdo: filtra reactivamente la radiografía. */
+export type SeleccionActiva =
+  | { tipo: 'global' }
+  | { tipo: 'ciudad'; ciudad: string }
+  | { tipo: 'patrulla'; patrullaId: string; nombre: string }
+  | { tipo: 'operador'; operadorId: string; nombre: string }
+
 /** Nodo del árbol Ciudad → Patrulla → Operador. */
 interface NodoOperador {
+  /** `id` del técnico, o `null` cuando el barrio no tiene dueño asignado. */
+  id: string | null
   tecnico?: Tecnico
   nombre: string
   cierres: number
@@ -52,6 +61,7 @@ interface NodoOperador {
 }
 
 interface NodoPatrulla {
+  id: string | null
   tecnico?: Tecnico
   nombre: string
   cierres: number
@@ -77,6 +87,8 @@ interface FilaCierre {
 }
 
 const SIN_DUENO = 'Sin dueño asignado'
+/** Clave sintética para los nodos sin técnico ("Sin patrulla" / "Sin dueño"). */
+const SIN_ID = '__sin_id__'
 
 /**
  * Compara dos nombres de técnico ignorando tildes, mayúsculas y orden de las
@@ -125,6 +137,9 @@ export function CierresTecnicos({
   const [busquedaServicio, setBusquedaServicio] = useState('')
   const [orden, setOrden] = useState<Ordenamiento | null>({ columna: 'fecha', direccion: 'desc' })
   const [generandoPdf, setGenerandoPdf] = useState(false)
+  // Foco del árbol izquierdo: ciudad, patrulla u operador. Reacciona en la
+  // radiografía, los contadores y el PDF.
+  const [seleccionActiva, setSeleccionActiva] = useState<SeleccionActiva>({ tipo: 'global' })
   const panelBarriosRef = useRef<HTMLDivElement>(null)
   const panelServiciosRef = useRef<HTMLDivElement>(null)
 
@@ -245,9 +260,38 @@ export function CierresTecnicos({
     return q ? serviciosDisponibles.filter((s) => s.clave.includes(q)) : serviciosDisponibles
   }, [serviciosDisponibles, busquedaServicio])
 
+  /**
+   * ¿La fila cae dentro del foco del árbol? Es independiente de los filtros de
+   * la barra (fecha/barrio/servicio/búsqueda): todos se combinan con AND.
+   */
+  const coincideSeleccion = useCallback(
+    (fila: FilaCierre): boolean => {
+      switch (seleccionActiva.tipo) {
+        case 'global':
+          return true
+        case 'ciudad':
+          return fila.cierre.ciudad === seleccionActiva.ciudad
+        case 'patrulla':
+          // "Sin patrulla" no tiene id: se identifica por no tener técnico.
+          return seleccionActiva.patrullaId === SIN_ID
+            ? !fila.patrulla
+            : fila.patrulla?.id === seleccionActiva.patrullaId
+        case 'operador':
+          // Igual con "Sin dueño": filas cuyo barrio no tiene titular.
+          return seleccionActiva.operadorId === SIN_ID
+            ? !fila.operador
+            : fila.operador?.id === seleccionActiva.operadorId
+        default:
+          return true
+      }
+    },
+    [seleccionActiva],
+  )
+
   const filasFiltradas = useMemo(() => {
     const texto = limpiarTexto(busqueda)
     const base = filas.filter((fila) => {
+      if (!coincideSeleccion(fila)) return false
       if (rangoFecha && (fila.fechaMs < rangoFecha.desde || fila.fechaMs >= rangoFecha.hasta)) {
         return false
       }
@@ -297,7 +341,7 @@ export function CierresTecnicos({
           return 0
       }
     })
-  }, [filas, rangoFecha, barriosSeleccionados, serviciosSeleccionados, busqueda, orden])
+  }, [filas, coincideSeleccion, rangoFecha, barriosSeleccionados, serviciosSeleccionados, busqueda, orden])
 
   /**
    * Árbol de cierres por célula: Ciudad → Patrulla → Operador de Zona.
@@ -316,9 +360,11 @@ export function CierresTecnicos({
       nodoCiudad.cierres += 1
 
       const nombrePatrulla = fila.patrulla?.nombre ?? 'Sin patrulla'
+      const idPatrulla = fila.patrulla?.id ?? null
       let nodoPatrulla = nodoCiudad.patrullas.find((p) => p.nombre === nombrePatrulla)
       if (!nodoPatrulla) {
         nodoPatrulla = {
+          id: idPatrulla,
           tecnico: fila.patrulla,
           nombre: nombrePatrulla,
           cierres: 0,
@@ -331,9 +377,11 @@ export function CierresTecnicos({
       nodoPatrulla.cierres += 1
 
       const nombreOperador = fila.operador?.nombre ?? SIN_DUENO
+      const idOperador = fila.operador?.id ?? null
       let nodoOperador = nodoPatrulla.operadores.find((o) => o.nombre === nombreOperador)
       if (!nodoOperador) {
         nodoOperador = {
+          id: idOperador,
           tecnico: fila.operador,
           nombre: nombreOperador,
           cierres: 0,
@@ -361,12 +409,23 @@ export function CierresTecnicos({
     return [...porCiudad.values()].sort((a, b) => b.cierres - a.cierres)
   }, [filas])
 
-  const totales = useMemo(() => {
-    const titulares = filas.filter((f) => f.origen === 'titular').length
-    const externos = filas.filter((f) => f.origen === 'externo').length
-    const sinDueno = filas.filter((f) => f.origen === 'sin_dueno').length
-    return { total: filas.length, titulares, externos, sinDueno }
-  }, [filas])
+  /** Totales SOLO del foco activo: alimentan las tarjetas y el subtítulo. */
+  const totalesFoco = useMemo(() => {
+    const enFoco = filas.filter(coincideSeleccion)
+    return {
+      total: enFoco.length,
+      titulares: enFoco.filter((f) => f.origen === 'titular').length,
+      externos: enFoco.filter((f) => f.origen === 'externo').length,
+    }
+  }, [filas, coincideSeleccion])
+
+  const esGlobal = seleccionActiva.tipo === 'global'
+  const etiquetaFoco =
+    seleccionActiva.tipo === 'ciudad'
+      ? seleccionActiva.ciudad
+      : seleccionActiva.tipo === 'global'
+        ? null
+        : seleccionActiva.nombre
 
   // Cierra los desplegables al hacer clic fuera.
   useEffect(() => {
@@ -434,6 +493,33 @@ export function CierresTecnicos({
     setBusquedaServicio('')
   }
 
+  /** Clic en un nodo: activa el foco; repetir el clic vuelve a la vista global. */
+  const seleccionarCiudad = (ciudad: string) => {
+    setSeleccionActiva((prev) =>
+      prev.tipo === 'ciudad' && prev.ciudad === ciudad ? { tipo: 'global' } : { tipo: 'ciudad', ciudad },
+    )
+  }
+
+  const seleccionarPatrulla = (id: string | null, nombre: string) => {
+    const clave = id ?? SIN_ID
+    setSeleccionActiva((prev) =>
+      prev.tipo === 'patrulla' && prev.patrullaId === clave
+        ? { tipo: 'global' }
+        : { tipo: 'patrulla', patrullaId: clave, nombre },
+    )
+  }
+
+  const seleccionarOperador = (id: string | null, nombre: string) => {
+    const clave = id ?? SIN_ID
+    setSeleccionActiva((prev) =>
+      prev.tipo === 'operador' && prev.operadorId === clave
+        ? { tipo: 'global' }
+        : { tipo: 'operador', operadorId: clave, nombre },
+    )
+  }
+
+  const volverAGlobal = () => setSeleccionActiva({ tipo: 'global' })
+
   const hayFiltros =
     filtroFecha !== 'semana' ||
     busqueda.trim() !== '' ||
@@ -467,6 +553,9 @@ export function CierresTecnicos({
       }))
 
       const partes: string[] = []
+      if (seleccionActiva.tipo === 'ciudad') partes.push(`Ciudad: ${seleccionActiva.ciudad}`)
+      if (seleccionActiva.tipo === 'patrulla') partes.push(`Patrulla: ${seleccionActiva.nombre}`)
+      if (seleccionActiva.tipo === 'operador') partes.push(`Operador: ${seleccionActiva.nombre}`)
       const etiquetasFecha: Record<FiltroFecha, string> = {
         semana: 'Toda la semana',
         hoy: `Hoy (${fechaMaxima ?? 'sin datos'})`,
@@ -505,6 +594,7 @@ export function CierresTecnicos({
     }
   }, [
     filasFiltradas,
+    seleccionActiva,
     filtroFecha,
     fechaEspecifica,
     fechaMaxima,
@@ -531,15 +621,25 @@ export function CierresTecnicos({
             <div>
               <h2 className="text-sm font-bold text-slate-900">Cierres por célula</h2>
               <p className="text-[11px] text-slate-500">
-                {totales.total} cierres en {arbol.length} ciudades
+                {totalesFoco.total} cierres en {arbol.length} ciudades
               </p>
             </div>
           </header>
 
           <div className="mb-3 grid grid-cols-2 gap-1.5">
-            <Metrica etiqueta="Titulares" valor={totales.titulares} clase="text-emerald-600" />
-            <Metrica etiqueta="Externos" valor={totales.externos} clase="text-red-600" />
+            <Metrica etiqueta="Titulares" valor={totalesFoco.titulares} clase="text-emerald-600" />
+            <Metrica etiqueta="Externos" valor={totalesFoco.externos} clase="text-red-600" />
           </div>
+
+          {!esGlobal && (
+            <button
+              type="button"
+              onClick={volverAGlobal}
+              className="mb-2 flex w-full items-center justify-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[11px] font-semibold text-cyan-700 transition hover:bg-cyan-500/20"
+            >
+              <X className="size-3" /> Ver Vista Global
+            </button>
+          )}
 
           {arbol.length === 0 ? (
             <p className="text-xs text-slate-400">
@@ -547,52 +647,102 @@ export function CierresTecnicos({
             </p>
           ) : (
             <div className="max-h-[560px] space-y-1.5 overflow-y-auto pr-1">
-              {arbol.map((ciudad) => (
-                <details key={ciudad.ciudad} className="group" open>
-                  <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg bg-slate-100 px-2 py-1.5 text-xs font-semibold text-slate-800 transition hover:bg-slate-200">
-                    <span className="inline-flex min-w-0 items-center gap-1.5">
-                      <Building2 className="size-3.5 shrink-0 text-slate-500" />
-                      <span className="truncate">{ciudad.ciudad}</span>
-                    </span>
-                    <span className="tabular-nums">{ciudad.cierres}</span>
-                  </summary>
+              {arbol.map((ciudad) => {
+                const ciudadActiva =
+                  seleccionActiva.tipo === 'ciudad' && seleccionActiva.ciudad === ciudad.ciudad
+                return (
+                  <details key={ciudad.ciudad} className="group" open>
+                    <summary className="list-none">
+                      <button
+                        type="button"
+                        onClick={() => seleccionarCiudad(ciudad.ciudad)}
+                        aria-pressed={ciudadActiva}
+                        className={cn(
+                          'flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs font-semibold transition',
+                          ciudadActiva
+                            ? 'border border-cyan-500/40 bg-cyan-500/10 text-cyan-900'
+                            : 'bg-slate-100 text-slate-800 hover:bg-slate-200',
+                        )}
+                      >
+                        <span className="inline-flex min-w-0 items-center gap-1.5">
+                          <Building2 className="size-3.5 shrink-0 text-slate-500" />
+                          <span className="truncate">{ciudad.ciudad}</span>
+                        </span>
+                        <span className="tabular-nums">{ciudad.cierres}</span>
+                      </button>
+                    </summary>
 
-                  <div className="mt-1 space-y-1 pl-2">
-                    {ciudad.patrullas.map((patrulla) => (
-                      <details key={`${ciudad.ciudad}-${patrulla.nombre}`} open>
-                        <summary className="flex cursor-pointer list-none items-center justify-between rounded-md px-1.5 py-1 text-[11px] font-medium text-slate-700 transition hover:bg-slate-50">
-                          <span className="inline-flex min-w-0 items-center gap-1.5">
-                            <Users className="size-3 shrink-0 text-slate-400" />
-                            <span className="truncate">{nombreCorto(patrulla.nombre)}</span>
-                          </span>
-                          <span className="tabular-nums">{patrulla.cierres}</span>
-                        </summary>
-
-                        <ul className="mt-0.5 space-y-0.5 border-l border-slate-200 pl-2">
-                          {patrulla.operadores.map((operador) => (
-                            <li
-                              key={`${patrulla.nombre}-${operador.nombre}`}
-                              className="flex items-center justify-between gap-1 rounded px-1 py-0.5 text-[11px] text-slate-600"
-                            >
-                              <span className="truncate" title={operador.nombre}>
-                                {nombreCorto(operador.nombre)}
-                              </span>
-                              <span className="flex shrink-0 items-center gap-1 tabular-nums">
-                                {operador.externos > 0 && (
-                                  <span className="text-[10px] font-semibold text-red-500">
-                                    ⚠{operador.externos}
-                                  </span>
+                    <div className="mt-1 space-y-1 pl-2">
+                      {ciudad.patrullas.map((patrulla) => {
+                        const clavePatrulla = patrulla.id ?? SIN_ID
+                        const patrullaActiva =
+                          seleccionActiva.tipo === 'patrulla' &&
+                          seleccionActiva.patrullaId === clavePatrulla
+                        return (
+                          <details key={`${ciudad.ciudad}-${patrulla.nombre}`} open>
+                            <summary className="list-none">
+                              <button
+                                type="button"
+                                onClick={() => seleccionarPatrulla(patrulla.id, patrulla.nombre)}
+                                aria-pressed={patrullaActiva}
+                                className={cn(
+                                  'flex w-full items-center justify-between rounded-md px-1.5 py-1 text-[11px] font-medium transition',
+                                  patrullaActiva
+                                    ? 'border border-cyan-500/40 bg-cyan-500/10 text-cyan-900'
+                                    : 'text-slate-700 hover:bg-slate-50',
                                 )}
-                                <span className="font-bold">{operador.cierres}</span>
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </details>
-                    ))}
-                  </div>
-                </details>
-              ))}
+                              >
+                                <span className="inline-flex min-w-0 items-center gap-1.5">
+                                  <Users className="size-3 shrink-0 text-slate-400" />
+                                  <span className="truncate">{nombreCorto(patrulla.nombre)}</span>
+                                </span>
+                                <span className="tabular-nums">{patrulla.cierres}</span>
+                              </button>
+                            </summary>
+
+                            <ul className="mt-0.5 space-y-0.5 border-l border-slate-200 pl-2">
+                              {patrulla.operadores.map((operador) => {
+                                const claveOperador = operador.id ?? SIN_ID
+                                const operadorActivo =
+                                  seleccionActiva.tipo === 'operador' &&
+                                  seleccionActiva.operadorId === claveOperador
+                                return (
+                                  <li key={`${patrulla.nombre}-${operador.nombre}`}>
+                                    <button
+                                      type="button"
+                                      onClick={() => seleccionarOperador(operador.id, operador.nombre)}
+                                      aria-pressed={operadorActivo}
+                                      title={operador.nombre}
+                                      className={cn(
+                                        'flex w-full cursor-pointer items-center justify-between gap-1 rounded px-1.5 py-1 text-left text-[11px] transition',
+                                        operadorActivo
+                                          ? 'border border-cyan-500/40 bg-cyan-500/10 font-semibold text-cyan-900'
+                                          : 'text-slate-600 hover:bg-slate-100',
+                                      )}
+                                    >
+                                      <span className="truncate">
+                                        {nombreCorto(operador.nombre)}
+                                      </span>
+                                      <span className="flex shrink-0 items-center gap-1 tabular-nums">
+                                        {operador.externos > 0 && (
+                                          <span className="text-[10px] font-semibold text-red-500">
+                                            ⚠{operador.externos}
+                                          </span>
+                                        )}
+                                        <span className="font-bold">{operador.cierres}</span>
+                                      </span>
+                                    </button>
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          </details>
+                        )
+                      })}
+                    </div>
+                  </details>
+                )
+              })}
             </div>
           )}
         </section>
@@ -607,12 +757,28 @@ export function CierresTecnicos({
                 <Search className="size-4 text-emerald-300" />
               </span>
               <div>
-                <h2 className="text-sm font-bold text-slate-900">Radiografía de cierres</h2>
+                <h2 className="text-sm font-bold text-slate-900">
+                  {esGlobal
+                    ? `Radiografía de cierres (${filasFiltradas.length} de ${filas.length} cierres · Global)`
+                    : `Radiografía de cierres: ${etiquetaFoco} (${totalesFoco.total} cierres en su zona)`}
+                </h2>
                 <p className="text-[11px] text-slate-500">
-                  {filasFiltradas.length} de {filas.length} cierres
+                  {esGlobal
+                    ? `${filasFiltradas.length} de ${filas.length} cierres`
+                    : `${filasFiltradas.length} visibles en el foco · Titulares ${totalesFoco.titulares} · Externos ${totalesFoco.externos}`}
                 </p>
               </div>
             </div>
+
+            {!esGlobal && (
+              <button
+                type="button"
+                onClick={volverAGlobal}
+                className="inline-flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-700 transition hover:bg-cyan-500/20"
+              >
+                <X className="size-3.5" /> Ver Vista Global
+              </button>
+            )}
 
             <label className="relative w-full sm:w-64">
               <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-slate-400" />
