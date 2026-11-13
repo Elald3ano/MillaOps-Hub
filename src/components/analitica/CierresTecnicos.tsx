@@ -94,20 +94,77 @@ const SIN_ID = '__sin_id__'
  * Compara dos nombres de técnico ignorando tildes, mayúsculas y orden de las
  * palabras ("WILMAR GALLON" vs "Gallon Wilmar" deben coincidir).
  */
-function mismoTecnico(a: string | undefined, b: string | undefined): boolean {
-  const normalizar = (valor: string | undefined) =>
-    limpiarTexto(valor)
-      .split(/\s+/)
-      .filter(Boolean)
-      .sort()
-      .join('|')
+/** Conectores que no aportan identidad al nombre. */
+const CONECTORES_NOMBRE = new Set([
+  'de',
+  'del',
+  'la',
+  'las',
+  'los',
+  'y',
+  'da',
+  'dos',
+  'van',
+  'von',
+  'e',
+])
 
-  const na = normalizar(a)
-  const nb = normalizar(b)
-  if (!na || !nb) return false
-  return na === nb
+/**
+ * Tokens significativos de un nombre: sin tildes, sin conectores, sin
+ * duplicados. Se separa por palabra ANTES de `limpiarTexto` porque esa función
+ * concatena todo (`"Jhon Sebastian"` → `"jhonsebastian"`).
+ */
+function tokensNombre(valor: string | undefined): string[] {
+  const palabras = String(valor ?? '')
+    .split(/\s+/)
+    .map((palabra) => limpiarTexto(palabra))
+    .filter((palabra) => palabra.length > 1 && !CONECTORES_NOMBRE.has(palabra))
+  return [...new Set(palabras)]
 }
 
+/**
+ * ¿El técnico que cerró en Sigma es el mismo que el titular del barrio?
+ *
+ * Sigma y el Hub escriben el mismo nombre de formas distintas: mayúsculas,
+ * orden invertido, apellidos abreviados o partículas. Exigir igualdad exacta
+ * marcaba como "Externo" a técnicos que sí eran los titulares.
+ *
+ * Se certifica como titular cuando:
+ *   1. la concatenación de tokens es idéntica, o
+ *   2. uno contiene al otro (`"Jhon Torijano"` ⊂ `"Jhon Sebastian Torijano"`), o
+ *   3. comparten al menos 2 tokens significativos.
+ *
+ * El umbral de 2 evita falsos positivos con nombres de una sola palabra común
+ * (`"Juan Perez"` vs `"Juan Rodriguez"`) y con etiquetas de oficina/API.
+ */
+function mismoTecnico(a: string | undefined, b: string | undefined): boolean {
+  const tokensA = tokensNombre(a)
+  const tokensB = tokensNombre(b)
+  if (tokensA.length === 0 || tokensB.length === 0) return false
+
+  const normA = tokensA.join('')
+  const normB = tokensB.join('')
+  if (normA === normB) return true
+  if (normA.includes(normB) || normB.includes(normA)) return true
+
+  const solape = tokensA.filter((token) => tokensB.includes(token)).length
+  return solape >= 2
+}
+
+/**
+ * Normaliza cualquier representación de fecha a la clave canónica `YYYY-MM-DD`.
+ *
+ * Necesario porque la misma fecha llega en tres formas distintas:
+ *   - `DATE` de Postgres: `2026-11-12`
+ *   - ISO del parser: `2026-11-12T05:00:00.000Z`
+ *   - valor del `<input type="date">`: `2026-11-12`
+ * Comparar por timestamp fallaba: `new Date('2026-11-12')` se interpreta UTC
+ * (`T00:00Z`) mientras el filtro se construía en hora local (`T05:00Z`), y la
+ * fila quedaba 5 horas antes del inicio del rango → tabla vacía.
+ */
+function fechaCanonica(valor: string | null | undefined): string {
+  return String(valor || '').slice(0, 10)
+}
 function nombreCorto(nombre: string): string {
   const partes = nombre.trim().split(/\s+/).filter(Boolean)
   return partes.slice(0, 2).join(' ')
@@ -207,19 +264,25 @@ export function CierresTecnicos({
 
   const fechaMaxima = fechas.length > 0 ? fechas[fechas.length - 1]! : null
 
-  /** Rango [desde, hasta] en ms según el preset de fecha. */
-  const rangoFecha = useMemo(() => {
-    if (filtroFecha === 'fecha') {
-      if (!fechaEspecifica) return null
-      const t = new Date(`${fechaEspecifica}T00:00:00`).getTime()
-      return { desde: t, hasta: t + 86_400_000 }
-    }
-    if (filtroFecha === 'semana') return null // sin recorte: es el paquete entero
-    if (!fechaMaxima) return null // sin datos no hay referencia para Hoy/Ayer
-    const base = new Date(`${fechaMaxima}T00:00:00`)
-    if (filtroFecha === 'ayer') base.setDate(base.getDate() - 1)
-    const desde = base.getTime()
-    return { desde, hasta: desde + 86_400_000 }
+  /**
+   * Día objetivo canónico (`YYYY-MM-DD`) para Hoy / Ayer / Fecha específica.
+   * `null` en "Toda la semana".
+   *
+   * Se compara por DÍA, no por timestamp: la columna es `DATE` y llega como
+   * `'2026-11-12'`, que `new Date()` interpreta en UTC, mientras el rango se
+   * construía en hora local (Bogotá, UTC−5) y la fila quedaba fuera del rango.
+   */
+  const diaObjetivo = useMemo(() => {
+    if (filtroFecha === 'fecha') return fechaCanonica(fechaEspecifica) || null
+    if (filtroFecha === 'semana' || !fechaMaxima) return null
+    if (filtroFecha === 'hoy') return fechaCanonica(fechaMaxima)
+
+    // Ayer: se resta un día al máximo con aritmética de calendario local.
+    const [anio, mes, dia] = fechaCanonica(fechaMaxima).split('-').map(Number)
+    if (!anio || !mes || !dia) return null
+    const base = new Date(anio, mes - 1, dia - 1)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${base.getFullYear()}-${pad(base.getMonth() + 1)}-${pad(base.getDate())}`
   }, [filtroFecha, fechaEspecifica, fechaMaxima])
 
   /** Barrios y servicios disponibles (sobre el universo, no sobre lo filtrado). */
@@ -292,7 +355,8 @@ export function CierresTecnicos({
     const texto = limpiarTexto(busqueda)
     const base = filas.filter((fila) => {
       if (!coincideSeleccion(fila)) return false
-      if (rangoFecha && (fila.fechaMs < rangoFecha.desde || fila.fechaMs >= rangoFecha.hasta)) {
+      // Comparación por día canónico: inmune a zona horaria y a ISO completo.
+      if (diaObjetivo && fechaCanonica(fila.cierre.fecha_cierre) !== diaObjetivo) {
         return false
       }
       if (
@@ -341,7 +405,7 @@ export function CierresTecnicos({
           return 0
       }
     })
-  }, [filas, coincideSeleccion, rangoFecha, barriosSeleccionados, serviciosSeleccionados, busqueda, orden])
+  }, [filas, coincideSeleccion, diaObjetivo, barriosSeleccionados, serviciosSeleccionados, busqueda, orden])
 
   /**
    * Árbol de cierres por célula: Ciudad → Patrulla → Operador de Zona.
